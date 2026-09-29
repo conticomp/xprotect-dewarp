@@ -7,6 +7,9 @@
     <AssemblyName>FisheyeDewarp</AssemblyName>
     <RootNamespace>FisheyeDewarp</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
+    <!-- Release builds override this from the git tag (v1.2.3 -> 1.2.3). -->
+    <Version>0.1.0-dev</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>

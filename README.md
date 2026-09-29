@@ -7,7 +7,7 @@ and re-add it through a plugin.
 It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye cameras, with a simpler workflow for operators.
 
 > [!WARNING]
-> **Prototype, provided as is.** This is early-stage software (version `0.1.0-spike`). It has been tested on one Smart Client
+> **Prototype, provided as is.** This is early-stage software (version 0.x). It has been tested on one Smart Client
 > installation with one camera model. It is provided **"AS IS", without warranty of any kind**, express or implied (see [LICENSE](LICENSE)).
 > Test it in your own environment before relying on it. Do not use it as the only means of reviewing video for safety-critical or
 > evidential purposes. Export evidence with XProtect's own tools.
@@ -37,44 +37,50 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 | Windows | 64-bit Windows 10 or 11 with .NET Framework 4.8 (included with current Windows). |
 | Graphics | A GPU that supports Pixel Shader 3.0 (any GPU from the last decade). Remote Desktop sessions use software rendering and will be slow. Test at the physical PC. |
 | Camera | Ceiling-mounted fisheye with a stereographic 182° lens. It was tuned for the **Axis M4328-P** and tested with an **Axis M3058**. |
-| To build | [.NET SDK](https://dotnet.microsoft.com/download) 8 or later (the SDK only; Visual Studio is not needed). |
+| To build (optional) | [.NET SDK](https://dotnet.microsoft.com/download) 8 or later (the SDK only; Visual Studio is not needed). Not needed if you install a release. |
 
 ## Installation
 
-The plugin is installed per Smart Client workstation. Build it once, then copy the same three files to every workstation.
+The plugin is installed on each Smart Client workstation.
 
-### 1. Build the plugin (once)
+### Option A: install a release (recommended)
 
-1. Install the [.NET SDK](https://dotnet.microsoft.com/download) on a build PC. This can be any Windows PC; it does not need XProtect.
-2. Download this repository: **Code → Download ZIP** on GitHub, then extract it. Or clone it:
+1. On the workstation, open the [**Releases**](https://github.com/conticomp/xprotect-dewarp/releases) page and download
+   `FisheyeDewarp-<version>.zip` from the latest release.
+2. *(Optional)* Check the download against the `.sha256` file published with it:
+   ```powershell
+   Get-FileHash .\FisheyeDewarp-<version>.zip -Algorithm SHA256
+   ```
+3. Right-click the zip, choose **Properties**, tick **Unblock** if it is shown, and click **OK**. Then choose **Extract All...**.
+4. **Close Smart Client.** It locks plugin files while running.
+5. Open **PowerShell as administrator** (right-click PowerShell, then **Run as administrator**), go to the extracted folder, and run:
+   ```powershell
+   cd "$env:USERPROFILE\Downloads\FisheyeDewarp-<version>"
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+   The script copies the plugin to `C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp` and unblocks the files.
+6. Start Smart Client and log in.
+7. Check that the plugin loaded: open a fisheye camera and hover over the tile. A **Dewarp** button (a circle icon) and a **Dewarped snapshot**
+   button (a camera icon) should appear on the tile's toolbar. If they are missing, see [Troubleshooting](#troubleshooting).
+
+To **upgrade**, repeat these steps with the new release. To **uninstall**, close Smart Client and run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` as administrator.
+
+> [!NOTE]
+> The DLL is not code-signed. Windows or your antivirus may warn about it. If your organisation requires signed plugins, build it
+> yourself (Option B) and sign it with your own certificate.
+
+### Option B: build from source
+
+1. Install the [.NET SDK](https://dotnet.microsoft.com/download) 8 or later on a build PC. This can be any Windows PC; it does not need XProtect.
+2. Clone or download this repository and build:
    ```powershell
    git clone https://github.com/conticomp/xprotect-dewarp.git
-   ```
-3. Open PowerShell in the repository folder and build:
-   ```powershell
+   cd xprotect-dewarp
    dotnet build src\FisheyeDewarp\FisheyeDewarp.csproj -c Release
    ```
-4. The output is in `src\FisheyeDewarp\bin\Release\net48\`. You need these three files:
-   - `FisheyeDewarp.dll`
-   - `plugin.def`
-   - `FisheyeDewarp.pdb` (optional, but it makes error logs more useful)
-
-### 2. Install on each Smart Client workstation
-
-1. **Close Smart Client.** It locks plugin files while running.
-2. Create this folder (you need administrator rights):
-   ```
-   C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp
-   ```
-3. Copy `FisheyeDewarp.dll`, `plugin.def` and `FisheyeDewarp.pdb` into that folder.
-4. If the files were downloaded or copied from another computer, unblock them. Otherwise Windows may refuse to load them.
-   Run this in an administrator PowerShell:
-   ```powershell
-   Get-ChildItem 'C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp' | Unblock-File
-   ```
-5. Start Smart Client and log in.
-6. Check that the plugin loaded: open a fisheye camera and hover over the tile. A **Dewarp** button (a circle icon) and a **Dewarped snapshot**
-   button (a camera icon) should appear on the tile's toolbar. If they are missing, see [Troubleshooting](#troubleshooting).
+3. Copy `FisheyeDewarp.dll`, `FisheyeDewarp.pdb` and `plugin.def` from `src\FisheyeDewarp\bin\Release\net48\`, together with
+   `packaging\install.ps1`, into one folder. Then follow steps 4–7 of Option A.
 
 ### Developer shortcut
 
@@ -133,8 +139,22 @@ The plugin writes a log to:
 
 ## Uninstall
 
-Close Smart Client and delete `C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp`. To remove the log as well, delete
+Close Smart Client and run `install.ps1 -Uninstall` as administrator (see above), or delete
+`C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp`. To remove the log as well, delete
 `%LOCALAPPDATA%\FisheyeDewarp`.
+
+## Releases and builds
+
+GitHub Actions builds the plugin on every push and pull request; the zip is available under the run's **Artifacts** for testing.
+Pushing a version tag publishes a release:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Tags with a suffix (for example `v0.2.0-beta.1`) are published as pre-releases. The plugin's version, shown in Smart Client's plugin list,
+comes from the tag.
 
 ## How it works
 

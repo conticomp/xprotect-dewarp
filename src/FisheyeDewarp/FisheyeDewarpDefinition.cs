@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using VideoOS.Platform;
 using VideoOS.Platform.Background;
 using VideoOS.Platform.Client;
@@ -17,7 +18,8 @@ namespace FisheyeDewarp
 
         public override string Manufacturer => "Continental Computers";
 
-        public override string VersionString => "0.1.0-spike";
+        public override string VersionString =>
+            typeof(FisheyeDewarpDefinition).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "dev";
 
         public override System.Drawing.Image Icon => null;
 

@@ -1,0 +1,66 @@
+name: Build
+
+# Every push and pull request builds the plugin and keeps the zip as a run artifact.
+# Pushing a tag like v0.1.0 also publishes a GitHub Release with the zip attached.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Work out version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME.TrimStart('v') }
+          else { $v = "0.0.0-ci.$env:GITHUB_RUN_NUMBER+$($env:GITHUB_SHA.Substring(0,7))" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "Version: $v"
+
+      - name: Build
+        run: dotnet build src/FisheyeDewarp/FisheyeDewarp.csproj -c Release -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $name = "FisheyeDewarp-${{ steps.version.outputs.version }}" -replace '\+', '-'
+          $stage = "out/$name"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $bin = 'src/FisheyeDewarp/bin/Release/net48'
+          Copy-Item "$bin/FisheyeDewarp.dll", "$bin/FisheyeDewarp.pdb", "$bin/plugin.def" $stage
+          Copy-Item packaging/install.ps1, README.md, LICENSE $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "out/$name.zip"
+          $hash = (Get-FileHash "out/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Set-Content "out/$name.zip.sha256" -Encoding ascii
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: out/${{ steps.package.outputs.name }}/
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $name = '${{ steps.package.outputs.name }}'
+          $releaseArgs = @($env:GITHUB_REF_NAME, "out/$name.zip", "out/$name.zip.sha256", '--title', "Fisheye Dewarp $env:GITHUB_REF_NAME", '--generate-notes')
+          if ('${{ steps.version.outputs.version }}' -match '-') { $releaseArgs += '--prerelease' }   # e.g. v0.1.0-beta.1
+          gh release create @releaseArgs
