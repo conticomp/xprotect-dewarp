@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using PixelFormat = System.Drawing.Imaging.PixelFormat;
 using System.Drawing.Text;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -12,6 +11,7 @@ using VideoOS.Platform;
 using VideoOS.Platform.Data;
 using VideoOS.Platform.Log;
 using VideoOS.Platform.Util;
+using PixelFormat = System.Drawing.Imaging.PixelFormat;
 
 namespace FisheyeDewarp
 {
@@ -33,6 +33,13 @@ namespace FisheyeDewarp
         public bool BurnIn { get; set; } = true;
     }
 
+    internal sealed class ExportResult
+    {
+        public bool Succeeded { get; set; }
+        public bool Cancelled { get; set; }
+        public string Message { get; set; }
+    }
+
     /// <summary>
     /// Recorded fisheye video -> fixed dewarped view -> H.264 MP4. Frames come from Milestone's decoder
     /// (BitmapVideoSource) at full resolution, go through a precomputed DewarpMap, get an optional camera
@@ -40,49 +47,85 @@ namespace FisheyeDewarp
     /// </summary>
     internal static class DewarpExporter
     {
+        public static readonly TimeSpan MaxDuration = TimeSpan.FromHours(4);
+
+        // Fetching recorded frames is bound by round trips to the recording server, not by CPU (about 2% CPU on
+        // 22 cores, near-linear scaling with parallel sources), so the range is split into chunks that are
+        // decoded, dewarped and encoded in parallel into temporary MP4s, then joined without re-encoding.
+        // Each source costs about 2.5 s to open and seek, hence the minimum chunk length.
+        private const int MaxParallel = 6;
+        private static readonly TimeSpan MinChunk = TimeSpan.FromSeconds(10);
+
+        private const string ExportAction = "EXPORT";
         private const string AuditApp = "FisheyeDewarp";
         private const string AuditComponent = "Export";
-        private const string AuditMessageId = "DewarpedExport";
+        private const string AuditExported = "DewarpedExport";
+        private const string AuditDenied = "DewarpedExportDenied";
+        private static readonly object AuditGate = new object();
         private static bool _auditRegistered;
 
-        /// <summary>Runs the export on a dedicated thread; BitmapVideoSource must be used from a single thread.</summary>
-        public static void Start(ExportRequest request, Action<string> progress, Action<string> done, bool benchmark = false)
+        /// <summary>
+        /// Whether the current user may export this camera. A denial is written to the audit log, since it is
+        /// an attempt to export.
+        /// </summary>
+        public static bool CheckPermission(Item camera)
+        {
+            try
+            {
+                SecurityAccess.CheckPermission(camera, ExportAction);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Info($"Export denied for camera='{camera?.Name}': {ex.Message}");
+                Audit(AuditDenied, camera, PermissionState.Denied, new Dictionary<string, string> { ["camera"] = camera?.Name ?? "" });
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Runs the export on background threads and reports progress (0..1) and the result from them.
+        /// BitmapVideoSource must be used from a single thread, so each chunk gets its own.
+        /// </summary>
+        public static void Start(ExportRequest request, Action<double> progress, Action<ExportResult> done, CancellationToken cancel)
         {
             var thread = new Thread(() =>
             {
-                string result;
+                ExportResult result;
                 try
                 {
-                    result = benchmark ? Benchmark(request, progress) : Run(request, progress);
+                    result = Run(request, progress, cancel);
+                }
+                catch (OperationCanceledException)
+                {
+                    Log.Info($"Export cancelled: {Describe(request)}");
+                    result = new ExportResult { Cancelled = true, Message = "Export cancelled." };
+                }
+                catch (MediaFoundationUnavailableException ex)
+                {
+                    Log.Error($"Export failed: {Describe(request)}", ex);
+                    result = new ExportResult { Message = ex.Message };
                 }
                 catch (Exception ex)
                 {
                     Log.Error($"Export failed: {Describe(request)}", ex);
-                    result = ex is MediaFoundationUnavailableException ? ex.Message : "Export failed: " + ex.Message;
+                    result = new ExportResult { Message = "Export failed: " + (ex.InnerException ?? ex).Message };
                 }
                 done(result);
             })
             {
                 IsBackground = true,
                 Name = "Dewarp export",
-                Priority = ThreadPriority.BelowNormal,
             };
             thread.SetApartmentState(ApartmentState.MTA);
             thread.Start();
         }
 
-        private const int MaxParallel = 6;
-        private static readonly TimeSpan MinChunk = TimeSpan.FromSeconds(10);
-
-        /// <summary>
-        /// Fetching recorded frames is bound by round trips to the recording server, not by CPU, so the range is
-        /// split into chunks that are decoded, dewarped and encoded in parallel into temporary MP4s, then joined
-        /// without re-encoding.
-        /// </summary>
-        private static string Run(ExportRequest r, Action<string> progress)
+        private static ExportResult Run(ExportRequest r, Action<double> progress, CancellationToken cancel)
         {
             Log.Info($"Export start {Describe(r)}");
-            ProbePermissions(r.Camera);
+            if (!CheckPermission(r.Camera))
+                return new ExportResult { Message = "You do not have permission to export video from this camera." };
             var total = Stopwatch.StartNew();
 
             TimeSpan duration = r.EndUtc - r.StartUtc;
@@ -97,6 +140,7 @@ namespace FisheyeDewarp
                 segments[k] = new Segment
                 {
                     Index = k,
+                    Last = k == count - 1,
                     Start = r.StartUtc + TimeSpan.FromTicks(duration.Ticks / count * k),
                     End = k == count - 1 ? r.EndUtc : r.StartUtc + TimeSpan.FromTicks(duration.Ticks / count * (k + 1)),
                     Path = Path.Combine(tempDir, $"part{k}.mp4"),
@@ -105,68 +149,61 @@ namespace FisheyeDewarp
 
             try
             {
-                var threads = new List<Thread>();
-                foreach (Segment segment in segments)
+                // Chunks are joined into one H.264 stream, so they must all come from the same encoder (mixing a
+                // GPU and the software encoder gives a corrupt file). Try the GPU for all of them; if it fails
+                // anywhere, for example a consumer NVIDIA card refusing another session, redo them all in software.
+                string encoder = "gpu";
+                if (!RunChunks(r, segments, hardware: true, progress, cancel, out Exception gpuError))
                 {
-                    Segment seg = segment;
-                    var thread = new Thread(() =>
-                    {
-                        try
-                        {
-                            ExportSegment(r, seg, segments, progress);
-                        }
-                        catch (Exception ex)
-                        {
-                            seg.Error = ex;
-                        }
-                    })
-                    {
-                        IsBackground = true,
-                        Name = "Dewarp export " + seg.Index,
-                        Priority = ThreadPriority.BelowNormal,
-                    };
-                    thread.SetApartmentState(ApartmentState.MTA);
-                    threads.Add(thread);
+                    Log.Info($"Export: GPU encoder failed ({gpuError.Message}); redoing all chunks with the software encoder");
+                    encoder = "software";
+                    foreach (Segment seg in segments) seg.Reset();
+                    if (!RunChunks(r, segments, hardware: false, progress, cancel, out Exception error))
+                        throw new InvalidOperationException(error.Message, error);
                 }
-                threads.ForEach(t => t.Start());
-                threads.ForEach(t => t.Join());
-                foreach (Segment seg in segments)
-                    if (seg.Error != null) throw new InvalidOperationException($"Chunk {seg.Index} failed: {seg.Error.Message}", seg.Error);
-                TimeSpan parallelTime = total.Elapsed;
+                TimeSpan chunkTime = total.Elapsed;
 
                 int frames = 0;
                 var parts = new List<(string, long)>();
                 foreach (Segment seg in segments)
                 {
                     frames += seg.Frames;
-                    if (seg.Frames > 0) parts.Add((seg.Path, (seg.FirstFrame - r.StartUtc).Ticks < 0 ? 0 : (seg.FirstFrame - r.StartUtc).Ticks));
+                    if (seg.Frames > 0) parts.Add((seg.Path, Math.Max(0, (seg.FirstFrame - r.StartUtc).Ticks)));
                 }
                 if (frames == 0)
                 {
                     Log.Info("Export found no recorded frames in the range");
-                    return "No recorded video in that time range";
+                    return new ExportResult { Message = "There is no recorded video in that time range." };
                 }
 
-                // Chunks from different encoders have different SPS/PPS; an MP4 track carries only the first set.
-                var encoders = new HashSet<string>();
-                foreach (Segment seg in segments)
-                    if (seg.Frames > 0) encoders.Add(seg.Encoder);
-                if (encoders.Count > 1) Log.Error("Export chunks used different encoders; the joined file may not play correctly: " + string.Join(", ", encoders));
-
-                progress("Finishing...");
                 var join = Stopwatch.StartNew();
-                Mp4Joiner.Join(parts, r.Path);
+                try
+                {
+                    Mp4Joiner.Join(parts, r.Path);
+                }
+                catch
+                {
+                    TryDelete(r.Path);   // a half-written MP4 is unplayable
+                    throw;
+                }
                 join.Stop();
 
                 double sec = total.Elapsed.TotalSeconds;
                 foreach (Segment seg in segments)
                     Log.Info($"Export chunk {seg.Index} {seg.Start:HH:mm:ss.fff}..{seg.End:HH:mm:ss.fff} {seg.Frames} frames, first frame after {seg.FirstFrameMs} ms " +
                              $"| per frame: decode {Per(seg.Decode, seg.Frames)} dewarp {Per(seg.Dewarp, seg.Frames)} burn-in {Per(seg.Overlay, seg.Frames)} encode {Per(seg.Encode, seg.Frames)} ms " +
-                             $"| decode={seg.DecodeStatus} encoder={seg.Encoder}");
-                Log.Info($"Export done {frames} frames in {count} chunks, {sec:F1} s ({frames / Math.Max(sec, 0.001):F1} fps; chunks {parallelTime.TotalSeconds:F1} s, join {join.ElapsedMilliseconds} ms) " +
+                             $"| decode={seg.DecodeStatus} encoder={encoder}");
+                Log.Info($"Export done {frames} frames in {count} chunks, {sec:F1} s ({frames / Math.Max(sec, 0.001):F1} fps; chunks {chunkTime.TotalSeconds:F1} s, join {join.ElapsedMilliseconds} ms) " +
                          $"| {r.Path} ({new FileInfo(r.Path).Length / 1024} KB)");
-                Audit(r, frames);
-                return $"Exported {frames} frames to {Path.GetFileName(r.Path)}";
+
+                Audit(AuditExported, r.Camera, PermissionState.Granted, new Dictionary<string, string>
+                {
+                    ["camera"] = r.Camera.Name,
+                    ["start"] = r.StartUtc.ToString("o"),
+                    ["end"] = r.EndUtc.ToString("o"),
+                    ["file"] = r.Path,
+                });
+                return new ExportResult { Succeeded = true, Message = $"Exported {frames} frames to {r.Path}" };
             }
             finally
             {
@@ -181,243 +218,165 @@ namespace FisheyeDewarp
             }
         }
 
+        /// <summary>
+        /// Runs every chunk on its own thread. A failed chunk cancels the others rather than letting them run to
+        /// the end for nothing. False (with the first error) if a chunk failed; throws if the user cancelled.
+        /// </summary>
+        private static bool RunChunks(ExportRequest r, Segment[] segments, bool hardware, Action<double> progress, CancellationToken cancel, out Exception error)
+        {
+            using (var chunks = CancellationTokenSource.CreateLinkedTokenSource(cancel))
+            {
+                var threads = new List<Thread>();
+                foreach (Segment segment in segments)
+                {
+                    Segment seg = segment;
+                    var thread = new Thread(() =>
+                    {
+                        try
+                        {
+                            ExportSegment(r, seg, hardware, () => progress(Progress(r, segments)), chunks.Token);
+                        }
+                        catch (Exception ex)
+                        {
+                            seg.Error = ex;
+                            chunks.Cancel();
+                        }
+                    })
+                    {
+                        IsBackground = true,
+                        Name = "Dewarp export " + seg.Index,
+                        Priority = ThreadPriority.BelowNormal,
+                    };
+                    thread.SetApartmentState(ApartmentState.MTA);
+                    threads.Add(thread);
+                }
+                threads.ForEach(t => t.Start());
+                threads.ForEach(t => t.Join());
+            }
+            cancel.ThrowIfCancellationRequested();
+            error = null;
+            foreach (Segment seg in segments)
+                if (seg.Error != null && !(seg.Error is OperationCanceledException))
+                {
+                    error = seg.Error;
+                    return false;
+                }
+            return true;
+        }
+
         /// <summary>One chunk: its own BitmapVideoSource and encoder, frames timed from the chunk's first frame.</summary>
-        private static void ExportSegment(ExportRequest r, Segment seg, Segment[] all, Action<string> progress)
+        private static void ExportSegment(ExportRequest r, Segment seg, bool hardware, Action reportProgress, CancellationToken cancel)
         {
             var sinceStart = Stopwatch.StartNew();
             var source = new BitmapVideoSource(r.Camera);
+            Mp4H264Writer writer = null;
             try
             {
                 source.Init(r.SourceWidth, r.SourceHeight, BitmapFormat.BGR32);
-                Mp4H264Writer writer = null;
-                try
+                using (var burnIn = r.BurnIn ? new BurnIn(r.Camera.Name, r.Width, r.Height) : null)
                 {
-                    using (var burnIn = r.BurnIn ? new BurnIn(r.Camera.Name, r.Width, r.Height) : null)
+                    var output = new byte[r.Width * r.Height * 4];
+                    byte[] pending = null;   // hold one frame back so its duration is known
+                    long pendingTime = 0, lastDuration = TimeSpan.FromSeconds(1 / 30.0).Ticks;
+                    DewarpMap map = null;
+                    int mapWidth = 0;
+
+                    seg.Decode.Start();
+                    object next = source.Get(seg.Start);
+                    seg.Decode.Stop();
+                    while (next is BitmapData frame)
                     {
-                        var output = new byte[r.Width * r.Height * 4];
-                        byte[] pending = null;   // hold one frame back so its duration is known
-                        long pendingTime = 0, lastDuration = TimeSpan.FromSeconds(1 / 30.0).Ticks;
-                        DewarpMap map = null;
-                        int mapWidth = 0;
+                        try
+                        {
+                            cancel.ThrowIfCancellationRequested();
+                            DateTime t = ToUtc(frame.DateTime);
+                            if (seg.Last ? t > seg.End : t >= seg.End)
+                            {
+                                next = null;   // disposed by the finally below
+                                break;
+                            }
+
+                            // Get() can land before the chunk start. The first chunk keeps the frame that was on
+                            // screen at the start time; later chunks leave it to the chunk before them.
+                            bool beforeStart = t < seg.Start;
+                            bool keep = !beforeStart || (seg.Index == 0 && seg.Frames == 0 && !(frame.IsNextAvailable && ToUtc(frame.NextDateTime) <= seg.Start));
+                            if (keep)
+                            {
+                                if (seg.Frames == 0)
+                                {
+                                    seg.FirstFrame = beforeStart ? seg.Start : t;
+                                    seg.FirstFrameMs = sinceStart.ElapsedMilliseconds;
+                                    seg.DecodeStatus = frame.HardwareDecodingStatus;
+                                }
+                                int planeWidth = frame.GetPlaneWidth(0);
+                                if (map == null || planeWidth != mapWidth)
+                                {
+                                    mapWidth = planeWidth;
+                                    map = DewarpMap.Build(r.Rotation, r.TanX, r.TanY, r.LensHalfFov, r.Width, r.Height,
+                                        planeWidth, frame.GetPlaneHeight(0), frame.GetPlaneStride(0));
+                                }
+
+                                seg.Dewarp.Start();
+                                map.Apply(frame.GetPlanePointer(0), output);
+                                seg.Dewarp.Stop();
+
+                                seg.Overlay.Start();
+                                burnIn?.Draw(output, t.ToLocalTime());
+                                seg.Overlay.Stop();
+
+                                long time = Math.Max(0, (t - seg.FirstFrame).Ticks);
+                                seg.Encode.Start();
+                                if (writer == null) writer = new Mp4H264Writer(seg.Path, r.Width, r.Height, 30, BitrateFor(r.Width, r.Height), hardware);
+                                if (pending != null)
+                                {
+                                    lastDuration = Math.Max(1, time - pendingTime);
+                                    writer.WriteFrame(pending, pendingTime, lastDuration);
+                                }
+                                seg.Encode.Stop();
+                                pending = pending ?? new byte[output.Length];
+                                Buffer.BlockCopy(output, 0, pending, 0, output.Length);
+                                pendingTime = time;
+                                seg.Frames++;
+                                seg.Done = t;
+                                if (seg.Frames % 10 == 0) reportProgress();
+                            }
+                        }
+                        finally
+                        {
+                            frame.Dispose();
+                        }
 
                         seg.Decode.Start();
-                        object next = source.Get(seg.Start);
+                        next = source.GetNext();
                         seg.Decode.Stop();
-                        while (next is BitmapData frame)
-                        {
-                            try
-                            {
-                                DateTime t = ToUtc(frame.DateTime);
-                                bool last = seg.Index == all.Length - 1;
-                                if (last ? t > seg.End : t >= seg.End) break;
-
-                                // Get() can land before the chunk start. The first chunk keeps the frame that was on
-                                // screen at the start time; later chunks leave it to the chunk before them.
-                                bool beforeStart = t < seg.Start;
-                                bool keep = !beforeStart || (seg.Index == 0 && seg.Frames == 0 && !(frame.IsNextAvailable && ToUtc(frame.NextDateTime) <= seg.Start));
-                                if (keep)
-                                {
-                                    if (seg.Frames == 0)
-                                    {
-                                        seg.FirstFrame = beforeStart ? seg.Start : t;
-                                        seg.FirstFrameMs = sinceStart.ElapsedMilliseconds;
-                                        seg.DecodeStatus = frame.HardwareDecodingStatus;
-                                    }
-                                    int planeWidth = frame.GetPlaneWidth(0);
-                                    if (map == null || planeWidth != mapWidth)
-                                    {
-                                        mapWidth = planeWidth;
-                                        map = DewarpMap.Build(r.Rotation, r.TanX, r.TanY, r.LensHalfFov, r.Width, r.Height,
-                                            planeWidth, frame.GetPlaneHeight(0), frame.GetPlaneStride(0));
-                                    }
-
-                                    seg.Dewarp.Start();
-                                    map.Apply(frame.GetPlanePointer(0), output);
-                                    seg.Dewarp.Stop();
-
-                                    seg.Overlay.Start();
-                                    burnIn?.Draw(output, t.ToLocalTime());
-                                    seg.Overlay.Stop();
-
-                                    long time = Math.Max(0, (t - seg.FirstFrame).Ticks);
-                                    seg.Encode.Start();
-                                    if (writer == null) writer = OpenWriter(r, seg);
-                                    if (pending != null)
-                                    {
-                                        lastDuration = Math.Max(1, time - pendingTime);
-                                        writer.WriteFrame(pending, pendingTime, lastDuration);
-                                    }
-                                    seg.Encode.Stop();
-                                    pending = pending ?? new byte[output.Length];
-                                    Buffer.BlockCopy(output, 0, pending, 0, output.Length);
-                                    pendingTime = time;
-                                    seg.Frames++;
-                                    seg.Done = t;
-                                    if (seg.Frames % 15 == 0) progress(Progress(r, all));
-                                }
-                            }
-                            finally
-                            {
-                                frame.Dispose();
-                            }
-
-                            seg.Decode.Start();
-                            next = source.GetNext();
-                            seg.Decode.Stop();
-                        }
-                        (next as BitmapData)?.Dispose();
-
-                        if (pending != null)
-                        {
-                            seg.Encode.Start();
-                            writer.WriteFrame(pending, pendingTime, lastDuration);
-                            writer.Finish();
-                            seg.Encode.Stop();
-                        }
                     }
-                }
-                finally
-                {
-                    writer?.Dispose();
+                    (next as BitmapData)?.Dispose();
+
+                    if (pending != null)
+                    {
+                        seg.Encode.Start();
+                        writer.WriteFrame(pending, pendingTime, lastDuration);
+                        writer.Finish();
+                        seg.Encode.Stop();
+                    }
                 }
             }
             finally
             {
+                writer?.Dispose();
                 source.Close();
             }
         }
 
-        /// <summary>Prefer a GPU encoder; consumer NVIDIA cards cap concurrent sessions, so fall back to software.</summary>
-        private static Mp4H264Writer OpenWriter(ExportRequest r, Segment seg)
-        {
-            int bitrate = BitrateFor(r.Width, r.Height);
-            try
-            {
-                var writer = new Mp4H264Writer(seg.Path, r.Width, r.Height, 30, bitrate, hardware: true);
-                seg.Encoder = "auto";
-                return writer;
-            }
-            catch (System.Runtime.InteropServices.COMException ex)
-            {
-                Log.Info($"Export chunk {seg.Index}: hardware encoder unavailable ({ex.Message}, 0x{ex.ErrorCode:X8}), using software");
-                seg.Encoder = "software";
-                return new Mp4H264Writer(seg.Path, r.Width, r.Height, 30, bitrate, hardware: false);
-            }
-        }
-
-        private static string Progress(ExportRequest r, Segment[] all)
+        private static double Progress(ExportRequest r, Segment[] all)
         {
             long done = 0;
             foreach (Segment seg in all)
-                if (seg.Frames > 0) done += (seg.Done - seg.Start).Ticks;
-            double pct = 100.0 * done / Math.Max(1, (r.EndUtc - r.StartUtc).Ticks);
-            return $"Exporting... {Math.Min(99, pct):F0}%";
+                if (seg.Frames > 0) done += Math.Max(0, (seg.Done - seg.Start).Ticks);
+            return Math.Min(0.99, (double)done / Math.Max(1, (r.EndUtc - r.StartUtc).Ticks));
         }
 
-        private sealed class Segment
-        {
-            public int Index;
-            public DateTime Start, End, FirstFrame, Done;
-            public string Path;
-            public int Frames;
-            public long FirstFrameMs;
-            public string DecodeStatus, Encoder;
-            public Exception Error;
-            public readonly Stopwatch Decode = new Stopwatch(), Dewarp = new Stopwatch(), Overlay = new Stopwatch(), Encode = new Stopwatch();
-        }
-
-        /// <summary>
-        /// Spike: decode-only throughput for different pixel formats and numbers of parallel sources, to see
-        /// whether decoding is CPU, colour-conversion or round-trip bound.
-        /// </summary>
-        private static string Benchmark(ExportRequest r, Action<string> progress)
-        {
-            const int framesPerSource = 40;
-            Log.Info($"Benchmark start {Describe(r)} cpus={Environment.ProcessorCount}");
-            var summary = new List<string>();
-            var configs = new (string Name, BitmapFormat Format, int Sources)[]
-            {
-                ("BGR32 x1", BitmapFormat.BGR32, 1),
-                ("YUV420 x1", BitmapFormat.YCbCr420_Planar, 1),
-                ("BGR32 x2", BitmapFormat.BGR32, 2),
-                ("BGR32 x4", BitmapFormat.BGR32, 4),
-            };
-            foreach (var c in configs)
-            {
-                progress($"Benchmark {c.Name}...");
-                Process process = Process.GetCurrentProcess();
-                TimeSpan cpu0 = process.TotalProcessorTime;
-                var wall = Stopwatch.StartNew();
-                var counts = new int[c.Sources];
-                var threads = new List<Thread>();
-                string decodeStatus = null;
-                for (int k = 0; k < c.Sources; k++)
-                {
-                    int index = k;
-                    DateTime from = r.StartUtc + TimeSpan.FromTicks((r.EndUtc - r.StartUtc).Ticks / c.Sources * index);
-                    var t = new Thread(() =>
-                    {
-                        var source = new BitmapVideoSource(r.Camera);
-                        try
-                        {
-                            source.Init(r.SourceWidth, r.SourceHeight, c.Format);
-                            object next = source.Get(from);
-                            while (next is BitmapData frame && counts[index] < framesPerSource)
-                            {
-                                decodeStatus = decodeStatus ?? frame.HardwareDecodingStatus;
-                                frame.Dispose();
-                                counts[index]++;
-                                next = source.GetNext();
-                            }
-                            (next as BitmapData)?.Dispose();
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Error($"Benchmark {c.Name} source {index} failed", ex);
-                        }
-                        finally
-                        {
-                            source.Close();
-                        }
-                    }) { IsBackground = true };
-                    t.SetApartmentState(ApartmentState.MTA);
-                    threads.Add(t);
-                }
-                // Wall time includes each source's Init and first seek, as a real chunked export would.
-                threads.ForEach(t => t.Start());
-                threads.ForEach(t => t.Join());
-                wall.Stop();
-                process.Refresh();
-                double cpuPct = (process.TotalProcessorTime - cpu0).TotalMilliseconds / wall.Elapsed.TotalMilliseconds / Environment.ProcessorCount * 100;
-                int total = 0;
-                foreach (int n in counts) total += n;
-                string line = $"{c.Name}: {total} frames in {wall.Elapsed.TotalSeconds:F1} s = {total / wall.Elapsed.TotalSeconds:F1} fps, CPU {cpuPct:F0}% of machine, decode={decodeStatus}";
-                Log.Info("Benchmark " + line);
-                summary.Add(line);
-            }
-            return "Benchmark done, see log";
-        }
-
-        /// <summary>Spike: log which camera permission IDs the SDK accepts, to confirm the real export action ID.</summary>
-        private static void ProbePermissions(Item camera)
-        {
-            var results = new List<string>();
-            foreach (string action in new[] { "EXPORT", "GENERIC_READ", "PLAYBACK", "VIEW_LIVE", "EXPORT_SEQUENCE" })
-            {
-                try
-                {
-                    SecurityAccess.CheckPermission(camera, action);
-                    results.Add(action + "=granted");
-                }
-                catch (Exception ex)
-                {
-                    results.Add($"{action}=denied({ex.GetType().Name}: {ex.Message})");
-                }
-            }
-            Log.Info("Export permission probe: " + string.Join("; ", results));
-        }
-
-        private static void Audit(ExportRequest r, int frames)
+        private static void Audit(string messageId, Item camera, string permission, Dictionary<string, string> values)
         {
             try
             {
@@ -426,41 +385,40 @@ namespace FisheyeDewarp
                     Log.Info("Audit: LogClient not initialized, no server audit entry written");
                     return;
                 }
-                if (!_auditRegistered)
+                lock (AuditGate)
                 {
-#pragma warning disable CS0618 // the 25.3+ overload with applicationName is not in 25.2
-                    var messages = new Dictionary<string, LogMessage>
+                    if (!_auditRegistered)
                     {
-                        [AuditMessageId] = new LogMessage
+                        var messages = new Dictionary<string, LogMessage>
                         {
-                            Id = AuditMessageId,
-                            Group = Group.Audit,
-                            Category = "Export",
-                            Severity = Severity.Info,
-                            Status = Status.StatusQuo,
-                            RelatedObjectKind = Kind.Camera,
-                            Message = "Dewarped MP4 export of {camera} from {start} to {end} ({frames} frames) to {file}",
-                        },
-                    };
-                    LogClient.Instance.RegisterDictionary(new LogMessageDictionary("en-US", "1.0", AuditApp, AuditComponent, messages, "Camera"));
+                            [AuditExported] = AuditMessage(AuditExported, "Dewarped MP4 export of {camera} from {start} to {end} to {file}"),
+                            [AuditDenied] = AuditMessage(AuditDenied, "Dewarped MP4 export of {camera} denied: no export permission"),
+                        };
+#pragma warning disable CS0618 // the 25.3+ overload with applicationName is not in 25.2
+                        LogClient.Instance.RegisterDictionary(new LogMessageDictionary("en-US", "1.0", AuditApp, AuditComponent, messages, "Camera"));
 #pragma warning restore CS0618
-                    _auditRegistered = true;
+                        _auditRegistered = true;
+                    }
                 }
-                LogClient.Instance.AuditEntry(AuditApp, AuditComponent, AuditMessageId, r.Camera, new Dictionary<string, string>
-                {
-                    ["camera"] = r.Camera.Name,
-                    ["start"] = r.StartUtc.ToString("o"),
-                    ["end"] = r.EndUtc.ToString("o"),
-                    ["frames"] = frames.ToString(),
-                    ["file"] = r.Path,
-                }, PermissionState.Granted);
-                Log.Info("Audit entry written");
+                LogClient.Instance.AuditEntry(AuditApp, AuditComponent, messageId, camera, values, permission);
+                Log.Info($"Audit entry written: {messageId}");
             }
             catch (Exception ex)
             {
                 Log.Error("Audit entry failed", ex);
             }
         }
+
+        private static LogMessage AuditMessage(string id, string text) => new LogMessage
+        {
+            Id = id,
+            Group = Group.Audit,
+            Category = "Export",
+            Severity = Severity.Info,
+            Status = Status.StatusQuo,
+            RelatedObjectKind = Kind.Camera,
+            Message = text,
+        };
 
         private static int BitrateFor(int width, int height) => (int)Math.Min(20_000_000, Math.Max(2_000_000, width * (long)height * 4));
 
@@ -469,7 +427,46 @@ namespace FisheyeDewarp
         private static string Per(Stopwatch sw, int frames) => frames == 0 ? "-" : (sw.Elapsed.TotalMilliseconds / frames).ToString("F1");
 
         private static string Describe(ExportRequest r) =>
-            $"camera='{r.Camera?.Name}' {r.StartUtc:o}..{r.EndUtc:o} src={r.SourceWidth}x{r.SourceHeight} out={r.Width}x{r.Height} -> {r.Path}";
+            $"camera='{r.Camera?.Name}' {r.StartUtc:o}..{r.EndUtc:o} src={r.SourceWidth}x{r.SourceHeight} out={r.Width}x{r.Height} burnIn={r.BurnIn} -> {r.Path}";
+
+        private static void TryDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Could not delete incomplete export " + path, ex);
+            }
+        }
+
+        private sealed class Segment
+        {
+            public int Index;
+            public bool Last;
+            public DateTime Start, End, FirstFrame, Done;
+            public string Path;
+            public int Frames;
+            public long FirstFrameMs;
+            public string DecodeStatus;
+            public Exception Error;
+            public readonly Stopwatch Decode = new Stopwatch(), Dewarp = new Stopwatch(), Overlay = new Stopwatch(), Encode = new Stopwatch();
+
+            /// <summary>Forget a failed attempt before redoing the chunk.</summary>
+            public void Reset()
+            {
+                Frames = 0;
+                FirstFrameMs = 0;
+                FirstFrame = Done = default;
+                DecodeStatus = null;
+                Error = null;
+                Decode.Reset();
+                Dewarp.Reset();
+                Overlay.Reset();
+                Encode.Reset();
+            }
+        }
 
         /// <summary>Camera name and timestamp drawn into the top-left corner of each frame.</summary>
         private sealed class BurnIn : IDisposable

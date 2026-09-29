@@ -74,8 +74,8 @@ namespace FisheyeDewarp
             }
             else if (_kind == ToolbarKind.Export)
             {
-                Title = "Export dewarped (spike)";
-                Tooltip = "Spike: export the last 30 seconds of the dewarped view to MP4 in Videos\\Dewarp exports.";
+                Title = "Export dewarped video";
+                Tooltip = "Export the dewarped view to MP4 for a time range.";
                 IconSource = _exportIcon ?? (_exportIcon = CreateIcon(ExportIcon()));
             }
             else
@@ -95,7 +95,11 @@ namespace FisheyeDewarp
 
         public override void Activate()
         {
-            if (_kind == ToolbarKind.Export) FindSession()?.ExportSpike();
+            if (_kind == ToolbarKind.Export)
+            {
+                TileSession session = FindSession();
+                if (session != null) ExportWindow.ShowFor(session);
+            }
             else FindSession()?.Snapshot();
         }
 

@@ -93,14 +93,22 @@ namespace FisheyeDewarp
                 Marshal.Release(output);
             }
 
+            // No B-frames: exports are joined from chunks without re-encoding, and reordered frames do not
+            // survive that (the Microsoft software encoder uses them by default; GPU encoders usually do not).
+            // Frame-accurate stepping in players is also more reliable without them.
+            Check(Native.MFCreateAttributes(out IMFAttributes encoding, 1), "MFCreateAttributes");
+            IntPtr encodingPtr = Marshal.GetComInterfaceForObject(encoding, typeof(IMFAttributes));
             IntPtr input = CreateVideoType(Guids.VideoFormatNV12, fps, t => t.SetUINT32(Guids.MtDefaultStride, width));
             try
             {
-                _writer.SetInputMediaType(_stream, input, IntPtr.Zero);
+                encoding.SetUINT32(Guids.CodecApiBPictureCount, 0);
+                _writer.SetInputMediaType(_stream, input, encodingPtr);
             }
             finally
             {
                 Marshal.Release(input);
+                Marshal.Release(encodingPtr);
+                Marshal.ReleaseComObject(encoding);
             }
 
             _writer.BeginWriting();
@@ -232,6 +240,7 @@ namespace FisheyeDewarp
             public static readonly Guid VideoFormatH264 = new Guid("34363248-0000-0010-8000-00aa00389b71");
             public static readonly Guid VideoFormatNV12 = new Guid("3231564e-0000-0010-8000-00aa00389b71");
             public static readonly Guid ReadWriteEnableHardwareTransforms = new Guid("a634a91c-822b-41b9-a494-4de4643612b0");
+            public static readonly Guid CodecApiBPictureCount = new Guid("8d390aac-dc5c-4200-b57f-814d04babab2");
             public static readonly Guid SinkWriterDisableThrottling = new Guid("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
         }
 

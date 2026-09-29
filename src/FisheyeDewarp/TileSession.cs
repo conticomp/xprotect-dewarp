@@ -49,10 +49,9 @@ namespace FisheyeDewarp
         private int _grabLogs;
         private DateTime _lastWheel;
 
-        // Latest frame the tile showed, for the export spike's time range and source size.
+        // Latest frame the tile showed, for the export's default times and source size.
         private DateTime _lastImageTime;
         private System.Drawing.Size _originalSize;
-        private bool _exportBusy;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -206,70 +205,40 @@ namespace FisheyeDewarp
             }
         }
 
-        /// <summary>
-        /// Spike: export the 30 seconds up to the frame on screen, dewarped with the current view, to
-        /// Videos\Dewarp exports. Timings go to the log.
-        /// </summary>
-        public void ExportSpike()
+        /// <summary>The camera shown in this tile, or null if it is not known yet.</summary>
+        public VideoOS.Platform.Item Camera => _addOn.CameraFQID == null ? null : VideoOS.Platform.Configuration.Instance.GetItem(_addOn.CameraFQID);
+
+        /// <summary>Recording time of the frame on screen (UTC), or null before the first frame.</summary>
+        public DateTime? DisplayedTimeUtc =>
+            _lastImageTime == default ? (DateTime?)null
+            : _lastImageTime.Kind == DateTimeKind.Local ? _lastImageTime.ToUniversalTime()
+            : DateTime.SpecifyKind(_lastImageTime, DateTimeKind.Utc);
+
+        /// <summary>The camera's full frame size, from the last frame shown.</summary>
+        public System.Drawing.Size SourceSize => _originalSize;
+
+        public double LensHalfFovRadians => LensHalfFov;
+
+        /// <summary>Width / height of the tile's picture, so an export frames exactly what the operator sees.</summary>
+        public double TileAspect
         {
-            if (!Enabled)
+            get
             {
-                Log.Info($"Export ignored, dewarp is off: {Describe()}");
-                return;
-            }
-            if (_exportBusy) return;
-            try
-            {
-                VideoOS.Platform.Item camera = VideoOS.Platform.Configuration.Instance.GetItem(_addOn.CameraFQID);
-                if (camera == null || _lastImageTime == default || _originalSize.Width == 0)
-                {
-                    ShowToast("No video to export yet");
-                    return;
-                }
-
-                DateTime end = _lastImageTime.Kind == DateTimeKind.Local ? _lastImageTime.ToUniversalTime() : DateTime.SpecifyKind(_lastImageTime, DateTimeKind.Utc);
-                Log.Info($"Export spike: tile image time {_lastImageTime:o} kind={_lastImageTime.Kind} original={_originalSize}");
                 Size paint = _addOn.PaintSizeWpf;
-                double aspect = paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
-                int width = 1920, height = Math.Max(2, (int)Math.Round(width / aspect / 2) * 2);
-                double tanX = Math.Tan(_view.Fov / 2);
-                string folder = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Dewarp exports");
-                string name = string.Concat(camera.Name.Split(System.IO.Path.GetInvalidFileNameChars()));
-                var request = new ExportRequest
-                {
-                    Camera = camera,
-                    StartUtc = end - TimeSpan.FromSeconds(30),
-                    EndUtc = end,
-                    SourceWidth = _originalSize.Width,
-                    SourceHeight = _originalSize.Height,
-                    Rotation = _view.Rotation(),
-                    TanX = tanX,
-                    TanY = tanX / aspect,
-                    LensHalfFov = LensHalfFov,
-                    Width = width,
-                    Height = height,
-                    Path = System.IO.Path.Combine(folder, $"{name} {end.ToLocalTime():yyyy-MM-dd HHmmss} dewarped.mp4"),
-                };
-                Log.Info($"Export spike view {_view}");
+                return paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
+            }
+        }
 
-                bool benchmark = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-                _exportBusy = true;
-                ShowToast(benchmark ? "Benchmarking decode..." : "Exporting...", keep: true);
-                Dispatcher dispatcher = _input.Dispatcher;
-                DewarpExporter.Start(request,
-                    text => dispatcher.BeginInvoke(new Action(() => ShowToast(text, keep: true))),
-                    text => dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        _exportBusy = false;
-                        ShowToast(text);
-                    })), benchmark);
-            }
-            catch (Exception ex)
-            {
-                _exportBusy = false;
-                Log.Error($"Export failed for {Describe()}", ex);
-                ShowToast("Export failed");
-            }
+        /// <summary>The Smart Client window holding this tile, to own dialogs.</summary>
+        public Window OwnerWindow => (_input != null ? Window.GetWindow(_input) : null) ?? Application.Current?.MainWindow;
+
+        /// <summary>The current virtual PTZ view, for an export. False when dewarp is off.</summary>
+        public bool TryGetView(out double[,] rotation, out double horizontalFov)
+        {
+            rotation = Enabled ? _view.Rotation() : null;
+            horizontalFov = _view.Fov;
+            if (Enabled) Log.Info($"Export view {_view} {Describe()}");
+            return Enabled;
         }
 
         /// <summary>
