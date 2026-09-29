@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using BitmapSource = System.Windows.Media.Imaging.BitmapSource;
+using System.Windows.Threading;
 using VideoOS.Platform.Client;
 using VideoOS.Platform.Messaging;
 
@@ -26,11 +29,9 @@ namespace FisheyeDewarp
         private Point _dragLast;
         private Rect _lastArea;
         private int _imageEventsLogged;
-        private bool _sharp;
-        private Rect _zoom = FullImage;
-        private int _zoomLogs;
-
-        private static readonly Rect FullImage = new Rect(0, 0, 1, 1);
+        private TextBlock _toast;
+        private DispatcherTimer _toastTimer;
+        private bool _snapshotBusy;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -62,21 +63,6 @@ namespace FisheyeDewarp
             }
         }
 
-        /// <summary>
-        /// Sharp mode: point Smart Client's digital zoom at the part of the fisheye the view uses, so the
-        /// shader samples it at display resolution instead of the whole circle squeezed into the tile.
-        /// </summary>
-        public void SetSharp(bool sharp)
-        {
-            _sharp = sharp;
-            _zoomLogs = 0;
-            Log.Info($"Sharp {(sharp ? "ON" : "OFF")} {Describe()}");
-            if (!Enabled) return;
-            _addOn.DigitalZoomEnabled = sharp;
-            if (!sharp) ResetDigitalZoom();
-            UpdateGeometry();
-        }
-
         private bool Enable()
         {
             if (Enabled) return true;
@@ -87,9 +73,20 @@ namespace FisheyeDewarp
             }
 
             _savedDigitalZoom = _addOn.DigitalZoomEnabled;
-            _addOn.DigitalZoomEnabled = _sharp;
+            _addOn.DigitalZoomEnabled = false;   // Smart Client's own zoom would fight the drag/scroll steering
 
-            _input = new Border { Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)), Cursor = Cursors.SizeAll };
+            _toast = new TextBlock
+            {
+                Foreground = Brushes.White,
+                Background = new SolidColorBrush(Color.FromArgb(0xC0, 0x20, 0x20, 0x20)),
+                Padding = new Thickness(12, 6, 12, 6),
+                FontSize = 14,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false,
+            };
+            _input = new Border { Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)), Cursor = Cursors.SizeAll, Child = _toast };
             _input.MouseLeftButtonDown += OnMouseDown;
             _input.MouseMove += OnMouseMove;
             _input.MouseLeftButtonUp += OnMouseUp;
@@ -113,7 +110,8 @@ namespace FisheyeDewarp
             if (_overlayId != Guid.Empty) _addOn.ActiveElementsOverlayRemove(_overlayId);
             _overlayId = Guid.Empty;
             _input = null;
-            if (_sharp) ResetDigitalZoom();
+            _toast = null;
+            _toastTimer?.Stop();
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
             Log.Info($"Dewarp OFF {Describe()}");
@@ -124,6 +122,84 @@ namespace FisheyeDewarp
         {
             _addOn.ImageDisplayedEvent -= OnImageDisplayed;
             if (Enabled) Disable();
+        }
+
+        /// <summary>
+        /// Copies the current dewarped view to the clipboard, rendered from the full-resolution frame
+        /// rather than the on-screen tile, so it is sharper than what the operator sees.
+        /// </summary>
+        public void Snapshot()
+        {
+            if (!Enabled)
+            {
+                Log.Info($"Snapshot ignored, dewarp is off: {Describe()}");
+                return;
+            }
+            if (_snapshotBusy) return;
+            try
+            {
+                BitmapSource frame = _addOn.GetCurrentDisplayedImageAsImageSource(false) as BitmapSource;
+                if (frame == null)
+                {
+                    ShowToast("No image to copy yet");
+                    return;
+                }
+
+                Size paint = _addOn.PaintSizeWpf;
+                double aspect = paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
+                double tanX = Math.Tan(_view.Fov / 2), tanY = tanX / aspect;
+                double[,] m = _view.Rotation();
+                SourceFrame source = SnapshotRenderer.Capture(frame);
+
+                // Match the fisheye's own pixel density at the centre of the view (stereographic lens), so the
+                // snapshot neither throws detail away nor pretends to more than the camera captured.
+                double theta = Math.Acos(Math.Max(-1, Math.Min(1, m[2, 2])));
+                double halfCos = Math.Cos(theta / 2);
+                double pixelsPerRadian = source.Width / 2.0 / (2 * Math.Tan(LensHalfFov / 2) * halfCos * halfCos);
+                int width = (int)Math.Max(1280, Math.Min(3840, pixelsPerRadian * 2 * tanX));
+                int height = Math.Max(1, (int)Math.Round(width / aspect));
+
+                _snapshotBusy = true;
+                ShowToast("Copying...", keep: true);
+                string camera = _addOn.CameraName;
+                string view = _view.ToString();
+                Task.Run(() => SnapshotRenderer.Render(source, m, tanX, tanY, LensHalfFov, width, height))
+                    .ContinueWith(t =>
+                    {
+                        _snapshotBusy = false;
+                        if (t.IsFaulted)
+                        {
+                            Log.Error($"Snapshot failed for {Describe()}", t.Exception);
+                            ShowToast("Snapshot failed");
+                            return;
+                        }
+                        Clipboard.SetImage(t.Result);
+                        Log.Info($"Snapshot {width}x{height} from {source.Width}x{source.Height} camera='{camera}' {view}");
+                        ShowToast("Dewarped snapshot copied to clipboard");
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
+            }
+            catch (Exception ex)
+            {
+                _snapshotBusy = false;
+                Log.Error($"Snapshot failed for {Describe()}", ex);
+                ShowToast("Snapshot failed");
+            }
+        }
+
+        private void ShowToast(string text, bool keep = false)
+        {
+            if (_toast == null) return;
+            _toast.Text = text;
+            _toast.Visibility = Visibility.Visible;
+            _toastTimer?.Stop();
+            if (keep) return;
+            _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _toastTimer.Tick += (s, e) =>
+            {
+                _toastTimer?.Stop();
+                if (_toast != null) _toast.Visibility = Visibility.Collapsed;
+            };
+            _toastTimer.Start();
         }
 
         /// <summary>Where the video sits inside the tile, and how large the output is, feed the shader constants.</summary>
@@ -139,9 +215,6 @@ namespace FisheyeDewarp
 
             Size paint = _addOn.PaintSizeWpf;
             double aspect = paint.Height > 0 ? paint.Width / paint.Height : 1;
-            if (_sharp) UpdateDigitalZoom(aspect);
-            else _zoom = FullImage;
-            _effect.SetZoom(_zoom);
 
             double tanX = Math.Tan(_view.Fov / 2);
             _effect.SetLens(tanX, tanX / aspect, LensHalfFov, LensProjection.Stereographic);
@@ -152,50 +225,6 @@ namespace FisheyeDewarp
                 _input.Width = paint.Width;
                 _input.Height = paint.Height;
             }
-        }
-
-        private void UpdateDigitalZoom(double aspect)
-        {
-            Rect need = _view.SourceRegion(aspect, LensHalfFov);
-            bool covered = _zoom.Contains(need);
-            bool tooLoose = need.Width * need.Height < 0.3 * _zoom.Width * _zoom.Height;
-            if (covered && !tooLoose) return;
-
-            Rect target = need;
-            target.Inflate(need.Width * 0.2, need.Height * 0.2);
-            target.Intersect(FullImage);
-            Size img = _addOn.ImageSizeWpf;
-            if (img.Width <= 0 || img.Height <= 0 || target.IsEmpty) return;
-
-            _addOn.DigitalZoomRectangle = new PTZRectangleCommandData
-            {
-                RefWidth = (int)img.Width,
-                RefHeight = (int)img.Height,
-                Left = (int)(target.Left * img.Width),
-                Top = (int)(target.Top * img.Height),
-                Right = (int)(target.Right * img.Width),
-                Bottom = (int)(target.Bottom * img.Height),
-            };
-            PTZRectangleCommandData actual = _addOn.DigitalZoomRectangle;
-            if (actual.RefWidth > 0 && actual.RefHeight > 0)
-            {
-                _zoom = new Rect(
-                    new Point(actual.Left / (double)actual.RefWidth, actual.Top / (double)actual.RefHeight),
-                    new Point(actual.Right / (double)actual.RefWidth, actual.Bottom / (double)actual.RefHeight));
-            }
-            if (_zoomLogs++ < 6)
-                Log.Info($"DigitalZoom need={need} requested={target} actual=[{actual.Left},{actual.Top},{actual.Right},{actual.Bottom} of {actual.RefWidth}x{actual.RefHeight}] zoom={_zoom} | {GeometryReport()}");
-        }
-
-        private void ResetDigitalZoom()
-        {
-            Size img = _addOn.ImageSizeWpf;
-            _zoom = FullImage;
-            if (img.Width <= 0) return;
-            _addOn.DigitalZoomRectangle = new PTZRectangleCommandData
-            {
-                RefWidth = (int)img.Width, RefHeight = (int)img.Height, Left = 0, Top = 0, Right = (int)img.Width, Bottom = (int)img.Height,
-            };
         }
 
         /// <summary>

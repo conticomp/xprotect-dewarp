@@ -10,13 +10,13 @@ using System.Windows.Media.Imaging;
 
 namespace FisheyeDewarp
 {
-    /// <summary>"Dewarp" toggle on every camera tile's toolbar, in Live and Playback.</summary>
     internal enum ToolbarKind
     {
         Dewarp,
-        Sharp,
+        Snapshot,
     }
 
+    /// <summary>Camera tile toolbar buttons, in Live and Playback: the Dewarp toggle and the dewarped Snapshot action.</summary>
     internal sealed class DewarpToolbarPlugin : ViewItemToolbarPlugin
     {
         private readonly ToolbarKind _kind;
@@ -25,11 +25,12 @@ namespace FisheyeDewarp
 
         public override Guid Id => _kind == ToolbarKind.Dewarp
             ? new Guid("2F5D8C1A-7E43-4C8B-9B6F-0A1D3E5C7B92")
-            : new Guid("7C1E9A3B-5D2F-4E8A-A6B4-3F0C9D8E2A17");
+            : new Guid("A4D7E2B9-6C31-4F58-9E0A-2B8C5D1F7E63");
 
         public override string Name => _kind.ToString();
 
-        public override ToolbarPluginType ToolbarPluginType => ToolbarPluginType.Toggle;
+        public override ToolbarPluginType ToolbarPluginType =>
+            _kind == ToolbarKind.Dewarp ? ToolbarPluginType.Toggle : ToolbarPluginType.Action;
 
         public override ToolbarPluginOverflowMode ToolbarPluginOverflowMode => ToolbarPluginOverflowMode.NeverInOverflow;
 
@@ -49,7 +50,8 @@ namespace FisheyeDewarp
 
     internal sealed class DewarpToolbarPluginInstance : ViewItemToolbarPluginInstance
     {
-        private static VideoOSIconSourceBase _icon;
+        private static VideoOSIconSourceBase _dewarpIcon;
+        private static VideoOSIconSourceBase _snapshotIcon;
         private readonly ToolbarKind _kind;
         private Guid _windowId;
         private int _index = -1;
@@ -65,45 +67,68 @@ namespace FisheyeDewarp
             {
                 Title = "Dewarp";
                 Tooltip = "Dewarp this fisheye camera. Drag to look around, scroll to zoom, double-click to reset.";
-                IconSource = _icon ?? (_icon = CreateIcon());
+                IconSource = _dewarpIcon ?? (_dewarpIcon = CreateIcon(DewarpIcon()));
             }
             else
             {
-                Title = "Sharp";
-                Tooltip = "Prototype: use Smart Client's digital zoom so the dewarped view samples more detail.";
+                Title = "Dewarped snapshot";
+                Tooltip = "Copy the dewarped view to the clipboard, at full camera resolution.";
+                IconSource = _snapshotIcon ?? (_snapshotIcon = CreateIcon(SnapshotIcon()));
             }
         }
 
         public override void OnIsCheckedChanged()
         {
+            TileSession session = FindSession();
+            if (session != null && !session.SetEnabled(IsChecked) && IsChecked)
+                IsChecked = false;
+        }
+
+        public override void Activate()
+        {
+            FindSession()?.Snapshot();
+        }
+
+        private TileSession FindSession()
+        {
             TileSession session = DewarpBackgroundPlugin.Find(_windowId, _index);
             if (session == null)
-            {
                 Log.Error($"No tile found for window={_windowId} index={_index}. Known tiles: {DewarpBackgroundPlugin.DescribeAll()}");
-                return;
-            }
-            if (_kind == ToolbarKind.Sharp)
-                session.SetSharp(IsChecked);
-            else if (!session.SetEnabled(IsChecked) && IsChecked)
-                IsChecked = false;
+            return session;
         }
 
         public override void Close()
         {
         }
 
-        /// <summary>A lens circle with a highlighted view window, drawn in code so no image resources are needed.</summary>
-        private static VideoOSIconSourceBase CreateIcon()
+        /// <summary>A lens circle with a highlighted view window.</summary>
+        private static Drawing DewarpIcon()
         {
             var white = new SolidColorBrush(Colors.White);
             var group = new DrawingGroup();
             group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), new EllipseGeometry(new Point(8, 8), 6.5, 6.5)));
             group.Children.Add(new GeometryDrawing(white, null, Geometry.Parse("M 8,8 L 12.6,3.4 A 6.5,6.5 0 0 1 14.5,8 Z")));
+            return group;
+        }
+
+        /// <summary>A camera body with a lens.</summary>
+        private static Drawing SnapshotIcon()
+        {
+            var white = new SolidColorBrush(Colors.White);
+            var group = new DrawingGroup();
+            group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), Geometry.Parse("M 1.5,5 L 5,5 L 6.5,3 L 9.5,3 L 11,5 L 14.5,5 L 14.5,13 L 1.5,13 Z")));
+            group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), new EllipseGeometry(new Point(8, 8.8), 2.6, 2.6)));
+            return group;
+        }
+
+        /// <summary>Renders a 16-unit drawing to a 32px bitmap, so no image resources are needed.</summary>
+        private static VideoOSIconSourceBase CreateIcon(Drawing drawing)
+        {
             var visual = new DrawingVisual();
             using (DrawingContext dc = visual.RenderOpen())
             {
                 dc.PushTransform(new ScaleTransform(2, 2));
-                dc.DrawDrawing(group);
+                dc.DrawDrawing(drawing);
             }
             var bitmap = new RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32);
             bitmap.Render(visual);
