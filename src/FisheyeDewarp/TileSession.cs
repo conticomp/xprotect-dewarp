@@ -43,6 +43,11 @@ namespace FisheyeDewarp
         private bool _stillPending;
         private int _stillLogs;
         private int _noFrameLogs;
+        private bool _frameStale = true;
+        private bool _grabbing;
+        private bool _grabOnUiThread;
+        private int _grabLogs;
+        private DateTime _lastWheel;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -117,6 +122,7 @@ namespace FisheyeDewarp
             _imageEventsLogged = 0;
             _stillLogs = 0;
             _frame = null;
+            _frameStale = true;
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
@@ -240,27 +246,9 @@ namespace FisheyeDewarp
             _stillPending = false;
             try
             {
+                RequestFrame();
+                if (_frame == null) return;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                long captureMs = 0;
-                if (_frame == null)
-                {
-                    BitmapSource image = null;
-                    try
-                    {
-                        image = _addOn.GetCurrentDisplayedImageAsImageSource(false) as BitmapSource;
-                    }
-                    catch (NullReferenceException)
-                    {
-                        // Smart Client occasionally has no frame to hand out in Live; the next frame retries.
-                    }
-                    if (image == null)
-                    {
-                        if (_noFrameLogs++ < 3) Log.Info($"No full-resolution frame available yet for {Describe()}");
-                        return;
-                    }
-                    _frame = SnapshotRenderer.Capture(image);
-                    captureMs = sw.ElapsedMilliseconds;
-                }
                 RenderJob job = PrepareRender(_frame, fitToScreen: true);
                 Size paint = _lastPaint;
                 _stillBusy = true;
@@ -273,7 +261,7 @@ namespace FisheyeDewarp
                         return;
                     }
                     if (_stillLogs++ < 8)
-                        Log.Info($"Sharp render {job}, capture {captureMs} ms, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
+                        Log.Info($"Sharp render {job}, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
                     if (_still == null) return;
                     if (paint == _lastPaint)
                     {
@@ -288,6 +276,87 @@ namespace FisheyeDewarp
                 _stillBusy = false;
                 Log.Error($"Sharp render failed for {Describe()}", ex);
             }
+        }
+
+        /// <summary>While the operator steers, keep dewarping the frame already in hand; grabbing a new one is the slow part.</summary>
+        private bool Steering => (_input != null && _input.IsMouseCaptured) || DateTime.UtcNow - _lastWheel < TimeSpan.FromMilliseconds(300);
+
+        /// <summary>
+        /// Fetch the latest full-resolution frame in the background. Smart Client's frame grab can take
+        /// hundreds of milliseconds in Live, so it runs off the UI thread when Smart Client allows it,
+        /// and never while the operator is steering.
+        /// </summary>
+        private void RequestFrame()
+        {
+            if (_grabbing || !Enabled || (!_frameStale && _frame != null)) return;
+            if (_frame != null && Steering) return;
+            _grabbing = true;
+            _frameStale = false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool onUi = _grabOnUiThread;
+
+            Func<SourceFrame> grab = () =>
+            {
+                System.Drawing.Bitmap bitmap = null;
+                try
+                {
+                    // The deprecated GDI variant skips the WPF conversion that GetCurrentDisplayedImageAsImageSource does internally.
+#pragma warning disable CS0618
+                    bitmap = _addOn.GetCurrentDisplayedImageAsBitmap(false);
+#pragma warning restore CS0618
+                }
+                catch (NullReferenceException)
+                {
+                    // Smart Client occasionally has no frame to hand out in Live; the next frame retries.
+                }
+                if (bitmap == null) return null;
+                using (bitmap)
+                {
+                    long grabMs = sw.ElapsedMilliseconds;
+                    SourceFrame frame = SnapshotRenderer.Capture(bitmap);
+                    if (_grabLogs++ < 8)
+                        Log.Info($"Frame grab {frame.Width}x{frame.Height} on {(onUi ? "UI" : "worker")} thread: Smart Client {grabMs} ms, copy {sw.ElapsedMilliseconds - grabMs} ms, live={_addOn.InLiveMode}");
+                    return frame;
+                }
+            };
+
+            Action<SourceFrame> done = frame =>
+            {
+                _grabbing = false;
+                if (!Enabled) return;
+                if (frame == null)
+                {
+                    _frameStale = true;
+                    if (_noFrameLogs++ < 3) Log.Info($"No full-resolution frame available yet for {Describe()}");
+                    return;
+                }
+                _frame = frame;
+                RenderStill();
+            };
+
+            if (onUi)
+            {
+                SourceFrame frame = null;
+                try { frame = grab(); }
+                catch (Exception ex) { Log.Error($"Frame grab failed for {Describe()}", ex); }
+                done(frame);
+                return;
+            }
+
+            Task.Run(grab).ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    // Smart Client may insist on its own thread; fall back to grabbing there from now on.
+                    Log.Info($"Frame grab off the UI thread failed, using the UI thread from now on: {t.Exception?.InnerException?.GetType().Name}: {t.Exception?.InnerException?.Message}");
+                    _grabOnUiThread = true;
+                    _grabbing = false;
+                    _frameStale = true;
+                    RequestFrame();
+                    return;
+                }
+                done(t.Result);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         private void ShowToast(string text, bool keep = false)
@@ -378,7 +447,7 @@ namespace FisheyeDewarp
         {
             if (!Enabled) return;
             if (area != _lastArea || _addOn.PaintSizeWpf != _lastPaint) UpdateGeometry();
-            _frame = null;
+            _frameStale = true;
             RenderStill();
         }
 
@@ -422,12 +491,14 @@ namespace FisheyeDewarp
             {
                 _input.ReleaseMouseCapture();
                 Log.Info($"Drag end {_view}");
+                RenderStill();   // pick up the frames that arrived while dragging
             }
             e.Handled = true;
         }
 
         private void OnMouseWheel(object sender, MouseWheelEventArgs e)
         {
+            _lastWheel = DateTime.UtcNow;
             _view.Zoom(e.Delta);
             ViewChanged();
             e.Handled = true;

@@ -20,6 +20,28 @@ namespace FisheyeDewarp
             return new SourceFrame(pixels, bgra.PixelWidth, bgra.PixelHeight);
         }
 
+        /// <summary>Copies a GDI frame's pixels via LockBits, which is much cheaper than a WPF conversion. Any thread.</summary>
+        public static SourceFrame Capture(System.Drawing.Bitmap frame)
+        {
+            int width = frame.Width, height = frame.Height;
+            var rect = new System.Drawing.Rectangle(0, 0, width, height);
+            System.Drawing.Imaging.BitmapData data = frame.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try
+            {
+                var pixels = new int[width * height];
+                if (data.Stride == width * 4)
+                    System.Runtime.InteropServices.Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
+                else
+                    for (int y = 0; y < height; y++)
+                        System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + y * data.Stride, pixels, y * width, width);
+                return new SourceFrame(pixels, width, height);
+            }
+            finally
+            {
+                frame.UnlockBits(data);
+            }
+        }
+
         public static BitmapSource Render(SourceFrame src, double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
         {
             var output = new int[width * height];
