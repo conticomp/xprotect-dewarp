@@ -49,34 +49,46 @@ namespace FisheyeDewarp
 
             Parallel.For(0, height, y =>
             {
-                double sy = ((y + 0.5) / height * 2 - 1) * tanY;
                 int row = y * width;
                 for (int x = 0; x < width; x++)
                 {
-                    double sx = ((x + 0.5) / width * 2 - 1) * tanX;
-                    double n = Math.Sqrt(sx * sx + sy * sy + 1);
-                    double vx = sx / n, vy = sy / n, vz = 1 / n;
-                    double dx = m[0, 0] * vx + m[0, 1] * vy + m[0, 2] * vz;
-                    double dy = m[1, 0] * vx + m[1, 1] * vy + m[1, 2] * vz;
-                    double dz = m[2, 0] * vx + m[2, 1] * vy + m[2, 2] * vz;
-
-                    double theta = Math.Acos(Math.Max(-1, Math.Min(1, dz)));
-                    if (theta > lensHalfFov)
-                    {
-                        output[row + x] = unchecked((int)0xFF000000);
-                        continue;
-                    }
-                    double rn = Math.Tan(theta / 2) / tanHalfLens;
-                    double len = Math.Sqrt(dx * dx + dy * dy);
-                    double ix = 0.5 + (len > 1e-9 ? dx / len : 0) * rn * 0.5;
-                    double iy = 0.5 + (len > 1e-9 ? dy / len : 0) * rn * 0.5;
-                    output[row + x] = src.Sample(ix * src.Width - 0.5, iy * src.Height - 0.5);
+                    output[row + x] = MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy)
+                        ? src.Sample(ix * src.Width - 0.5, iy * src.Height - 0.5)
+                        : unchecked((int)0xFF000000);
                 }
             });
 
             var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, output, width * 4);
             bitmap.Freeze();
             return bitmap;
+        }
+
+        /// <summary>
+        /// Where output pixel (x, y) of a width x height view samples the fisheye image, as fractions 0..1 of the
+        /// image. False when the ray falls outside the lens. Same math as the shader.
+        /// </summary>
+        public static bool MapToSource(double[,] m, double tanX, double tanY, double lensHalfFov, double tanHalfLens,
+            int x, int y, int width, int height, out double ix, out double iy)
+        {
+            double sx = ((x + 0.5) / width * 2 - 1) * tanX;
+            double sy = ((y + 0.5) / height * 2 - 1) * tanY;
+            double n = Math.Sqrt(sx * sx + sy * sy + 1);
+            double vx = sx / n, vy = sy / n, vz = 1 / n;
+            double dx = m[0, 0] * vx + m[0, 1] * vy + m[0, 2] * vz;
+            double dy = m[1, 0] * vx + m[1, 1] * vy + m[1, 2] * vz;
+            double dz = m[2, 0] * vx + m[2, 1] * vy + m[2, 2] * vz;
+
+            double theta = Math.Acos(Math.Max(-1, Math.Min(1, dz)));
+            if (theta > lensHalfFov)
+            {
+                ix = iy = 0;
+                return false;
+            }
+            double rn = Math.Tan(theta / 2) / tanHalfLens;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            ix = 0.5 + (len > 1e-9 ? dx / len : 0) * rn * 0.5;
+            iy = 0.5 + (len > 1e-9 ? dy / len : 0) * rn * 0.5;
+            return true;
         }
     }
 

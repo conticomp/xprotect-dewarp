@@ -14,6 +14,7 @@ namespace FisheyeDewarp
     {
         Dewarp,
         Snapshot,
+        Export,
     }
 
     /// <summary>Camera tile toolbar buttons, in Live and Playback: the Dewarp toggle and the dewarped Snapshot action.</summary>
@@ -23,9 +24,10 @@ namespace FisheyeDewarp
 
         public DewarpToolbarPlugin(ToolbarKind kind) => _kind = kind;
 
-        public override Guid Id => _kind == ToolbarKind.Dewarp
-            ? new Guid("2F5D8C1A-7E43-4C8B-9B6F-0A1D3E5C7B92")
-            : new Guid("A4D7E2B9-6C31-4F58-9E0A-2B8C5D1F7E63");
+        public override Guid Id =>
+            _kind == ToolbarKind.Dewarp ? new Guid("2F5D8C1A-7E43-4C8B-9B6F-0A1D3E5C7B92")
+            : _kind == ToolbarKind.Snapshot ? new Guid("A4D7E2B9-6C31-4F58-9E0A-2B8C5D1F7E63")
+            : new Guid("5C1E8B3D-2A47-4F96-8D0B-7E3A9C6F1D24");
 
         public override string Name => _kind.ToString();
 
@@ -52,6 +54,7 @@ namespace FisheyeDewarp
     {
         private static VideoOSIconSourceBase _dewarpIcon;
         private static VideoOSIconSourceBase _snapshotIcon;
+        private static VideoOSIconSourceBase _exportIcon;
         private readonly ToolbarKind _kind;
         private Guid _windowId;
         private int _index = -1;
@@ -68,6 +71,12 @@ namespace FisheyeDewarp
                 Title = "Dewarp";
                 Tooltip = "Dewarp this fisheye camera. Drag to look around, scroll to zoom, double-click to reset.";
                 IconSource = _dewarpIcon ?? (_dewarpIcon = CreateIcon(DewarpIcon()));
+            }
+            else if (_kind == ToolbarKind.Export)
+            {
+                Title = "Export dewarped (spike)";
+                Tooltip = "Spike: export the last 30 seconds of the dewarped view to MP4 in Videos\\Dewarp exports.";
+                IconSource = _exportIcon ?? (_exportIcon = CreateIcon(ExportIcon()));
             }
             else
             {
@@ -86,7 +95,8 @@ namespace FisheyeDewarp
 
         public override void Activate()
         {
-            FindSession()?.Snapshot();
+            if (_kind == ToolbarKind.Export) FindSession()?.ExportSpike();
+            else FindSession()?.Snapshot();
         }
 
         private TileSession FindSession()
@@ -118,6 +128,16 @@ namespace FisheyeDewarp
             var group = new DrawingGroup();
             group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), Geometry.Parse("M 1.5,5 L 5,5 L 6.5,3 L 9.5,3 L 11,5 L 14.5,5 L 14.5,13 L 1.5,13 Z")));
             group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), new EllipseGeometry(new Point(8, 8.8), 2.6, 2.6)));
+            return group;
+        }
+
+        /// <summary>A film strip with a down arrow.</summary>
+        private static Drawing ExportIcon()
+        {
+            var white = new SolidColorBrush(Colors.White);
+            var group = new DrawingGroup();
+            group.Children.Add(new GeometryDrawing(null, new Pen(white, 1.5), Geometry.Parse("M 1.5,2.5 L 14.5,2.5 L 14.5,9.5 L 1.5,9.5 Z")));
+            group.Children.Add(new GeometryDrawing(white, null, Geometry.Parse("M 5,11 L 11,11 L 8,15 Z")));
             return group;
         }
 
