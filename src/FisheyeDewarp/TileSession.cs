@@ -252,8 +252,9 @@ namespace FisheyeDewarp
                 };
                 Log.Info($"Export spike view {_view}");
 
+                bool benchmark = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
                 _exportBusy = true;
-                ShowToast("Exporting...", keep: true);
+                ShowToast(benchmark ? "Benchmarking decode..." : "Exporting...", keep: true);
                 Dispatcher dispatcher = _input.Dispatcher;
                 DewarpExporter.Start(request,
                     text => dispatcher.BeginInvoke(new Action(() => ShowToast(text, keep: true))),
@@ -261,7 +262,7 @@ namespace FisheyeDewarp
                     {
                         _exportBusy = false;
                         ShowToast(text);
-                    })));
+                    })), benchmark);
             }
             catch (Exception ex)
             {

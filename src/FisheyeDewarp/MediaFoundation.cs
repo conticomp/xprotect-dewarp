@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -28,12 +29,28 @@ namespace FisheyeDewarp
         private int _stream;
         private bool _started;
 
-        public Mp4H264Writer(string path, int width, int height, int fps, int bitrate)
+        public Mp4H264Writer(string path, int width, int height, int fps, int bitrate, bool hardware = true)
         {
             if (width % 2 != 0 || height % 2 != 0) throw new ArgumentException("Width and height must be even for NV12.");
             _width = width;
             _height = height;
 
+            try
+            {
+                Startup();
+                _started = true;
+                Open(path, fps, bitrate, hardware);
+            }
+            catch
+            {
+                Dispose();   // a failed constructor would otherwise leak the writer and the MFStartup reference
+                throw;
+            }
+        }
+
+        /// <summary>MFStartup, turning a missing Media Foundation into a clear message. Pair with Native.MFShutdown.</summary>
+        internal static void Startup()
+        {
             try
             {
                 Check(Native.MFStartup(MfVersion, MfStartupLite), "MFStartup");
@@ -44,12 +61,16 @@ namespace FisheyeDewarp
                     "Windows Media Foundation is not installed. On Windows N editions install the Media Feature Pack; " +
                     "on Windows Server enable the 'Media Foundation' feature (Install-WindowsFeature Server-Media-Foundation).", ex);
             }
-            _started = true;
+        }
+
+        private void Open(string path, int fps, int bitrate, bool hardware)
+        {
+            int width = _width;
 
             Check(Native.MFCreateAttributes(out IMFAttributes attributes, 2), "MFCreateAttributes");
             try
             {
-                attributes.SetUINT32(Guids.ReadWriteEnableHardwareTransforms, 1);
+                attributes.SetUINT32(Guids.ReadWriteEnableHardwareTransforms, hardware ? 1 : 0);
                 attributes.SetUINT32(Guids.SinkWriterDisableThrottling, 1);
                 Check(Native.MFCreateSinkWriterFromURL(path, IntPtr.Zero, attributes, out _writer), "MFCreateSinkWriterFromURL");
             }
@@ -191,12 +212,12 @@ namespace FisheyeDewarp
 
         private static byte Clamp(int v) => (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
 
-        private static void Check(int hr, string what)
+        internal static void Check(int hr, string what)
         {
             if (hr < 0) throw new COMException(what + " failed", hr);
         }
 
-        private static class Guids
+        internal static class Guids
         {
             public static readonly Guid MtMajorType = new Guid("48eba18e-f8c9-4687-bf11-0a74c9f96a8f");
             public static readonly Guid MtSubtype = new Guid("f7e34c9a-42e8-4714-b74b-cb29d72c35e5");
@@ -214,7 +235,7 @@ namespace FisheyeDewarp
             public static readonly Guid SinkWriterDisableThrottling = new Guid("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
         }
 
-        private static class Native
+        internal static class Native
         {
             [DllImport("mfplat.dll", ExactSpelling = true)]
             public static extern int MFStartup(int version, int flags);
@@ -235,7 +256,90 @@ namespace FisheyeDewarp
             public static extern int MFCreateMemoryBuffer(int maxLength, out IMFMediaBuffer buffer);
 
             [DllImport("mfreadwrite.dll", ExactSpelling = true)]
+            public static extern int MFCreateSourceReaderFromURL([MarshalAs(UnmanagedType.LPWStr)] string url, IntPtr attributes, out IMFSourceReader reader);
+
+            [DllImport("mfreadwrite.dll", ExactSpelling = true)]
             public static extern int MFCreateSinkWriterFromURL([MarshalAs(UnmanagedType.LPWStr)] string url, IntPtr byteStream, IMFAttributes attributes, out IMFSinkWriter writer);
+        }
+    }
+
+    /// <summary>Concatenates H.264 MP4s from the same encoder settings into one file, without re-encoding.</summary>
+    internal static class Mp4Joiner
+    {
+        private const int FirstVideoStream = unchecked((int)0xFFFFFFFC);
+        private const int AllStreams = unchecked((int)0xFFFFFFFE);
+        private const int EndOfStream = 0x2;
+
+        /// <summary>Each part's samples are shifted by its offset (100 ns units from the start of the output).</summary>
+        public static void Join(IList<(string Path, long Offset)> parts, string output)
+        {
+            Mp4H264Writer.Startup();
+            IMFSinkWriter writer = null;
+            try
+            {
+                int stream = -1;
+                foreach ((string path, long offset) in parts)
+                {
+                    Mp4H264Writer.Check(Mp4H264Writer.Native.MFCreateSourceReaderFromURL(path, IntPtr.Zero, out IMFSourceReader reader), "MFCreateSourceReaderFromURL");
+                    try
+                    {
+                        reader.SetStreamSelection(AllStreams, false);
+                        reader.SetStreamSelection(FirstVideoStream, true);
+                        if (writer == null)
+                        {
+                            Mp4H264Writer.Check(Mp4H264Writer.Native.MFCreateAttributes(out IMFAttributes attributes, 1), "MFCreateAttributes");
+                            try
+                            {
+                                attributes.SetUINT32(Mp4H264Writer.Guids.SinkWriterDisableThrottling, 1);
+                                Mp4H264Writer.Check(Mp4H264Writer.Native.MFCreateSinkWriterFromURL(output, IntPtr.Zero, attributes, out writer), "MFCreateSinkWriterFromURL");
+                            }
+                            finally
+                            {
+                                Marshal.ReleaseComObject(attributes);
+                            }
+                            reader.GetCurrentMediaType(FirstVideoStream, out IntPtr type);
+                            try
+                            {
+                                writer.AddStream(type, out stream);
+                                writer.SetInputMediaType(stream, type, IntPtr.Zero);   // same type in and out: no transcoding
+                            }
+                            finally
+                            {
+                                Marshal.Release(type);
+                            }
+                            writer.BeginWriting();
+                        }
+
+                        while (true)
+                        {
+                            reader.ReadSample(FirstVideoStream, 0, out _, out int flags, out long time, out IMFSample sample);
+                            if (sample != null)
+                            {
+                                try
+                                {
+                                    sample.SetSampleTime(time + offset);
+                                    writer.WriteSample(stream, sample);
+                                }
+                                finally
+                                {
+                                    Marshal.ReleaseComObject(sample);
+                                }
+                            }
+                            if ((flags & EndOfStream) != 0) break;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(reader);
+                    }
+                }
+                writer?.FinalizeWriting();
+            }
+            finally
+            {
+                if (writer != null) Marshal.ReleaseComObject(writer);
+                Mp4H264Writer.Native.MFShutdown();
+            }
         }
     }
 
@@ -264,7 +368,8 @@ namespace FisheyeDewarp
         void A10(); void A11(); void A12(); void A13(); void A14(); void A15(); void A16(); void A17(); void A18(); void A19();
         void A20(); void A21(); void A22(); void A23(); void A24(); void A25(); void A26(); void A27(); void A28(); void A29();
 
-        void GetSampleFlags(); void SetSampleFlags(); void GetSampleTime();
+        void GetSampleFlags(); void SetSampleFlags();
+        void GetSampleTime(out long time);
         void SetSampleTime(long time);
         void GetSampleDuration();
         void SetSampleDuration(long duration);
@@ -279,6 +384,17 @@ namespace FisheyeDewarp
         void Unlock();
         void GetCurrentLength(out int length);
         void SetCurrentLength(int length);
+    }
+
+    [ComImport, Guid("70ae66f2-c809-4e4f-8915-bdcb406b7993"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMFSourceReader
+    {
+        void GetStreamSelection();
+        void SetStreamSelection(int streamIndex, [MarshalAs(UnmanagedType.Bool)] bool selected);
+        void GetNativeMediaType();
+        void GetCurrentMediaType(int streamIndex, out IntPtr mediaType);
+        void SetCurrentMediaType(); void SetCurrentPosition();
+        void ReadSample(int streamIndex, int controlFlags, out int actualStreamIndex, out int streamFlags, out long timestamp, out IMFSample sample);
     }
 
     [ComImport, Guid("3137f1cd-fe5e-4805-a5d8-fb477448cb3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
