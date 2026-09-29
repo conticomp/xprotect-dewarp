@@ -58,6 +58,43 @@ namespace FisheyeDewarp
         }
     }
 
+    /// <summary>A CPU dewarp ready to run on a worker thread.</summary>
+    internal sealed class RenderJob
+    {
+        private readonly SourceFrame _source;
+        private readonly double[,] _rotation;
+        private readonly double _tanX, _tanY, _lensHalfFov;
+        private readonly long _captureMs;
+        private long _renderMs;
+
+        public RenderJob(SourceFrame source, double[,] rotation, double tanX, double tanY, double lensHalfFov, int width, int height, long captureMs)
+        {
+            _source = source;
+            _rotation = rotation;
+            _tanX = tanX;
+            _tanY = tanY;
+            _lensHalfFov = lensHalfFov;
+            Width = width;
+            Height = height;
+            _captureMs = captureMs;
+        }
+
+        public int Width { get; }
+
+        public int Height { get; }
+
+        public BitmapSource Render()
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            BitmapSource result = SnapshotRenderer.Render(_source, _rotation, _tanX, _tanY, _lensHalfFov, Width, Height);
+            _renderMs = sw.ElapsedMilliseconds;
+            return result;
+        }
+
+        public override string ToString() =>
+            $"{Width}x{Height} from {_source.Width}x{_source.Height} (capture {_captureMs} ms, render {_renderMs} ms)";
+    }
+
     internal sealed class SourceFrame
     {
         private readonly int[] _pixels;
