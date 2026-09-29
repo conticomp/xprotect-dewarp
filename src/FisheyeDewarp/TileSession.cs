@@ -34,16 +34,15 @@ namespace FisheyeDewarp
         private bool _snapshotBusy;
         private Size _lastPaint;
 
-        // Sharp-when-still: after the view stops moving, the tile shows a full-resolution render of the
-        // current frame on top of the (softer) live shader view, refreshed as new frames arrive.
-        private static readonly TimeSpan SettleDelay = TimeSpan.FromMilliseconds(250);
+        // Sharp view: a CPU render from the full-resolution frame, shown over the (softer) shader view and
+        // redone whenever the view moves or a new frame arrives. The shader view only shows until the first
+        // render lands. The captured frame is reused while the operator drags over a still image.
         private Image _still;
-        private DispatcherTimer _settleTimer;
-        private bool _settled;
+        private SourceFrame _frame;
         private bool _stillBusy;
         private bool _stillPending;
-        private int _viewVersion;
         private int _stillLogs;
+        private int _noFrameLogs;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -108,8 +107,6 @@ namespace FisheyeDewarp
             var layers = new Grid();
             layers.Children.Add(_still);
             layers.Children.Add(_input);
-            _settleTimer = new DispatcherTimer { Interval = SettleDelay };
-            _settleTimer.Tick += OnSettled;
 
             UpdateGeometry();
             _addOn.VideoEffect = _effect;
@@ -119,7 +116,8 @@ namespace FisheyeDewarp
             Enabled = true;
             _imageEventsLogged = 0;
             _stillLogs = 0;
-            ViewChanged();
+            _frame = null;
+            RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
         }
@@ -133,10 +131,8 @@ namespace FisheyeDewarp
             _input = null;
             _toast = null;
             _toastTimer?.Stop();
-            _settleTimer?.Stop();
-            _settleTimer = null;
             _still = null;
-            _settled = false;
+            _frame = null;
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
             Log.Info($"Dewarp OFF {Describe()}");
@@ -171,7 +167,7 @@ namespace FisheyeDewarp
                     return;
                 }
 
-                RenderJob job = PrepareRender(frame, fitToScreen: false);
+                RenderJob job = PrepareRender(SnapshotRenderer.Capture(frame), fitToScreen: false);
                 _snapshotBusy = true;
                 ShowToast("Copying...", keep: true);
                 string camera = _addOn.CameraName;
@@ -203,14 +199,12 @@ namespace FisheyeDewarp
         /// Everything a CPU render needs, captured on the UI thread. Snapshots match the camera's pixel density;
         /// the on-screen still matches the tile's device pixels.
         /// </summary>
-        private RenderJob PrepareRender(BitmapSource frame, bool fitToScreen)
+        private RenderJob PrepareRender(SourceFrame source, bool fitToScreen)
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
             Size paint = _addOn.PaintSizeWpf;
             double aspect = paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
             double tanX = Math.Tan(_view.Fov / 2), tanY = tanX / aspect;
             double[,] m = _view.Rotation();
-            SourceFrame source = SnapshotRenderer.Capture(frame);
 
             int width;
             if (fitToScreen)
@@ -228,45 +222,48 @@ namespace FisheyeDewarp
                 width = (int)Math.Max(1280, Math.Min(3840, pixelsPerRadian * 2 * tanX));
             }
             int height = Math.Max(1, (int)Math.Round(width / aspect));
-            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height, sw.ElapsedMilliseconds);
+            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height);
         }
 
-        /// <summary>The view moved: show the live shader view, and plan a sharp render once it settles.</summary>
-        private void ViewChanged()
-        {
-            _viewVersion++;
-            _settled = false;
-            if (_still != null) _still.Visibility = Visibility.Collapsed;
-            if (_settleTimer == null) return;
-            _settleTimer.Stop();
-            _settleTimer.Start();
-        }
-
-        private void OnSettled(object sender, EventArgs e)
-        {
-            _settleTimer?.Stop();
-            _settled = true;
-            RenderStill();
-        }
-
-        /// <summary>Render the current frame at full resolution for the tile. At most one render runs at a time.</summary>
+        /// <summary>
+        /// Render the current view at full resolution for the tile. One render runs at a time; requests that
+        /// arrive meanwhile collapse into a single follow-up render with the latest view and frame.
+        /// </summary>
         private void RenderStill()
         {
-            if (!Enabled || !_settled || _still == null) return;
+            if (!Enabled || _still == null) return;
             if (_stillBusy)
             {
                 _stillPending = true;
                 return;
             }
+            _stillPending = false;
             try
             {
-                BitmapSource frame = _addOn.GetCurrentDisplayedImageAsImageSource(false) as BitmapSource;
-                if (frame == null) return;
-                RenderJob job = PrepareRender(frame, fitToScreen: true);
-                int version = _viewVersion;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
+                long captureMs = 0;
+                if (_frame == null)
+                {
+                    BitmapSource image = null;
+                    try
+                    {
+                        image = _addOn.GetCurrentDisplayedImageAsImageSource(false) as BitmapSource;
+                    }
+                    catch (NullReferenceException)
+                    {
+                        // Smart Client occasionally has no frame to hand out in Live; the next frame retries.
+                    }
+                    if (image == null)
+                    {
+                        if (_noFrameLogs++ < 3) Log.Info($"No full-resolution frame available yet for {Describe()}");
+                        return;
+                    }
+                    _frame = SnapshotRenderer.Capture(image);
+                    captureMs = sw.ElapsedMilliseconds;
+                }
+                RenderJob job = PrepareRender(_frame, fitToScreen: true);
+                Size paint = _lastPaint;
                 _stillBusy = true;
-                _stillPending = false;
                 Task.Run(job.Render).ContinueWith(t =>
                 {
                     _stillBusy = false;
@@ -275,11 +272,14 @@ namespace FisheyeDewarp
                         Log.Error($"Sharp render failed for {Describe()}", t.Exception);
                         return;
                     }
-                    if (_stillLogs++ < 5)
-                        Log.Info($"Sharp render {job}, total {sw.ElapsedMilliseconds} ms");
-                    if (_still == null || !_settled || version != _viewVersion) return;
-                    _still.Source = t.Result;
-                    _still.Visibility = Visibility.Visible;
+                    if (_stillLogs++ < 8)
+                        Log.Info($"Sharp render {job}, capture {captureMs} ms, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
+                    if (_still == null) return;
+                    if (paint == _lastPaint)
+                    {
+                        _still.Source = t.Result;
+                        _still.Visibility = Visibility.Visible;
+                    }
                     if (_stillPending) RenderStill();
                 }, TaskScheduler.FromCurrentSynchronizationContext());
             }
@@ -331,9 +331,9 @@ namespace FisheyeDewarp
             }
             if (paint != _lastPaint)
             {
-                // The tile changed size (e.g. toolbar or timeline shown); a still rendered for the old size is wrong.
+                // The tile changed size (e.g. toolbar or timeline shown); a render for the old shape would be distorted.
                 _lastPaint = paint;
-                ViewChanged();
+                if (_still != null) _still.Visibility = Visibility.Collapsed;
             }
         }
 
@@ -368,18 +368,25 @@ namespace FisheyeDewarp
             else dispatcher.BeginInvoke(new Action(() => OnFrame(e.VideoEffectArea)));
         }
 
+        private void ViewChanged()
+        {
+            UpdateGeometry();
+            RenderStill();
+        }
+
         private void OnFrame(Rect area)
         {
             if (!Enabled) return;
             if (area != _lastArea || _addOn.PaintSizeWpf != _lastPaint) UpdateGeometry();
-            if (_settled) RenderStill();
+            _frame = null;
+            RenderStill();
         }
 
         private void OnSizeOrLocationChanged(object sender, EventArgs e)
         {
             if (!Enabled || _input == null) return;
-            if (_input.Dispatcher.CheckAccess()) UpdateGeometry();
-            else _input.Dispatcher.BeginInvoke(new Action(UpdateGeometry));
+            if (_input.Dispatcher.CheckAccess()) ViewChanged();
+            else _input.Dispatcher.BeginInvoke(new Action(ViewChanged));
         }
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
@@ -387,7 +394,6 @@ namespace FisheyeDewarp
             if (e.ClickCount == 2)
             {
                 _view.Reset();
-                UpdateGeometry();
                 ViewChanged();
                 Log.Info($"Reset {_view}");
             }
@@ -395,7 +401,6 @@ namespace FisheyeDewarp
             {
                 _dragLast = e.GetPosition(_input);
                 _input.CaptureMouse();
-                ViewChanged();
             }
             e.Handled = true;
         }
@@ -407,7 +412,6 @@ namespace FisheyeDewarp
             double w = Math.Max(_input.ActualWidth, 1), h = Math.Max(_input.ActualHeight, 1);
             _view.Drag((p.X - _dragLast.X) / w, (p.Y - _dragLast.Y) / h, w / h);
             _dragLast = p;
-            UpdateGeometry();
             ViewChanged();
             e.Handled = true;
         }
@@ -425,7 +429,6 @@ namespace FisheyeDewarp
         private void OnMouseWheel(object sender, MouseWheelEventArgs e)
         {
             _view.Zoom(e.Delta);
-            UpdateGeometry();
             ViewChanged();
             e.Handled = true;
         }
