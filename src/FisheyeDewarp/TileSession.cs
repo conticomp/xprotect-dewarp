@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using VideoOS.Platform.Client;
+using VideoOS.Platform.Messaging;
 
 namespace FisheyeDewarp
 {
@@ -25,6 +26,11 @@ namespace FisheyeDewarp
         private Point _dragLast;
         private Rect _lastArea;
         private int _imageEventsLogged;
+        private bool _sharp;
+        private Rect _zoom = FullImage;
+        private int _zoomLogs;
+
+        private static readonly Rect FullImage = new Rect(0, 0, 1, 1);
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -56,6 +62,21 @@ namespace FisheyeDewarp
             }
         }
 
+        /// <summary>
+        /// Sharp mode: point Smart Client's digital zoom at the part of the fisheye the view uses, so the
+        /// shader samples it at display resolution instead of the whole circle squeezed into the tile.
+        /// </summary>
+        public void SetSharp(bool sharp)
+        {
+            _sharp = sharp;
+            _zoomLogs = 0;
+            Log.Info($"Sharp {(sharp ? "ON" : "OFF")} {Describe()}");
+            if (!Enabled) return;
+            _addOn.DigitalZoomEnabled = sharp;
+            if (!sharp) ResetDigitalZoom();
+            UpdateGeometry();
+        }
+
         private bool Enable()
         {
             if (Enabled) return true;
@@ -66,7 +87,7 @@ namespace FisheyeDewarp
             }
 
             _savedDigitalZoom = _addOn.DigitalZoomEnabled;
-            _addOn.DigitalZoomEnabled = false;
+            _addOn.DigitalZoomEnabled = _sharp;
 
             _input = new Border { Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)), Cursor = Cursors.SizeAll };
             _input.MouseLeftButtonDown += OnMouseDown;
@@ -92,6 +113,7 @@ namespace FisheyeDewarp
             if (_overlayId != Guid.Empty) _addOn.ActiveElementsOverlayRemove(_overlayId);
             _overlayId = Guid.Empty;
             _input = null;
+            if (_sharp) ResetDigitalZoom();
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
             Log.Info($"Dewarp OFF {Describe()}");
@@ -117,6 +139,10 @@ namespace FisheyeDewarp
 
             Size paint = _addOn.PaintSizeWpf;
             double aspect = paint.Height > 0 ? paint.Width / paint.Height : 1;
+            if (_sharp) UpdateDigitalZoom(aspect);
+            else _zoom = FullImage;
+            _effect.SetZoom(_zoom);
+
             double tanX = Math.Tan(_view.Fov / 2);
             _effect.SetLens(tanX, tanX / aspect, LensHalfFov, LensProjection.Stereographic);
             _effect.SetRotation(_view.Rotation());
@@ -126,6 +152,50 @@ namespace FisheyeDewarp
                 _input.Width = paint.Width;
                 _input.Height = paint.Height;
             }
+        }
+
+        private void UpdateDigitalZoom(double aspect)
+        {
+            Rect need = _view.SourceRegion(aspect, LensHalfFov);
+            bool covered = _zoom.Contains(need);
+            bool tooLoose = need.Width * need.Height < 0.3 * _zoom.Width * _zoom.Height;
+            if (covered && !tooLoose) return;
+
+            Rect target = need;
+            target.Inflate(need.Width * 0.2, need.Height * 0.2);
+            target.Intersect(FullImage);
+            Size img = _addOn.ImageSizeWpf;
+            if (img.Width <= 0 || img.Height <= 0 || target.IsEmpty) return;
+
+            _addOn.DigitalZoomRectangle = new PTZRectangleCommandData
+            {
+                RefWidth = (int)img.Width,
+                RefHeight = (int)img.Height,
+                Left = (int)(target.Left * img.Width),
+                Top = (int)(target.Top * img.Height),
+                Right = (int)(target.Right * img.Width),
+                Bottom = (int)(target.Bottom * img.Height),
+            };
+            PTZRectangleCommandData actual = _addOn.DigitalZoomRectangle;
+            if (actual.RefWidth > 0 && actual.RefHeight > 0)
+            {
+                _zoom = new Rect(
+                    new Point(actual.Left / (double)actual.RefWidth, actual.Top / (double)actual.RefHeight),
+                    new Point(actual.Right / (double)actual.RefWidth, actual.Bottom / (double)actual.RefHeight));
+            }
+            if (_zoomLogs++ < 6)
+                Log.Info($"DigitalZoom need={need} requested={target} actual=[{actual.Left},{actual.Top},{actual.Right},{actual.Bottom} of {actual.RefWidth}x{actual.RefHeight}] zoom={_zoom} | {GeometryReport()}");
+        }
+
+        private void ResetDigitalZoom()
+        {
+            Size img = _addOn.ImageSizeWpf;
+            _zoom = FullImage;
+            if (img.Width <= 0) return;
+            _addOn.DigitalZoomRectangle = new PTZRectangleCommandData
+            {
+                RefWidth = (int)img.Width, RefHeight = (int)img.Height, Left = 0, Top = 0, Right = (int)img.Width, Bottom = (int)img.Height,
+            };
         }
 
         /// <summary>

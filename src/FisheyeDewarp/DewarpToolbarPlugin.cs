@@ -11,11 +11,23 @@ using System.Windows.Media.Imaging;
 namespace FisheyeDewarp
 {
     /// <summary>"Dewarp" toggle on every camera tile's toolbar, in Live and Playback.</summary>
+    internal enum ToolbarKind
+    {
+        Dewarp,
+        Sharp,
+    }
+
     internal sealed class DewarpToolbarPlugin : ViewItemToolbarPlugin
     {
-        public override Guid Id => new Guid("2F5D8C1A-7E43-4C8B-9B6F-0A1D3E5C7B92");
+        private readonly ToolbarKind _kind;
 
-        public override string Name => "Dewarp";
+        public DewarpToolbarPlugin(ToolbarKind kind) => _kind = kind;
+
+        public override Guid Id => _kind == ToolbarKind.Dewarp
+            ? new Guid("2F5D8C1A-7E43-4C8B-9B6F-0A1D3E5C7B92")
+            : new Guid("7C1E9A3B-5D2F-4E8A-A6B4-3F0C9D8E2A17");
+
+        public override string Name => _kind.ToString();
 
         public override ToolbarPluginType ToolbarPluginType => ToolbarPluginType.Toggle;
 
@@ -32,23 +44,34 @@ namespace FisheyeDewarp
         {
         }
 
-        public override ViewItemToolbarPluginInstance GenerateViewItemToolbarPluginInstance() => new DewarpToolbarPluginInstance();
+        public override ViewItemToolbarPluginInstance GenerateViewItemToolbarPluginInstance() => new DewarpToolbarPluginInstance(_kind);
     }
 
     internal sealed class DewarpToolbarPluginInstance : ViewItemToolbarPluginInstance
     {
         private static VideoOSIconSourceBase _icon;
+        private readonly ToolbarKind _kind;
         private Guid _windowId;
         private int _index = -1;
+
+        public DewarpToolbarPluginInstance(ToolbarKind kind) => _kind = kind;
 
         public override void Init(Item viewItemInstance, Item window)
         {
             _windowId = window?.FQID?.ObjectId ?? Guid.Empty;
             if (viewItemInstance?.Properties != null && viewItemInstance.Properties.TryGetValue("Index", out string raw))
                 int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out _index);
-            Title = "Dewarp";
-            Tooltip = "Dewarp this fisheye camera. Drag to look around, scroll to zoom, double-click to reset.";
-            IconSource = _icon ?? (_icon = CreateIcon());
+            if (_kind == ToolbarKind.Dewarp)
+            {
+                Title = "Dewarp";
+                Tooltip = "Dewarp this fisheye camera. Drag to look around, scroll to zoom, double-click to reset.";
+                IconSource = _icon ?? (_icon = CreateIcon());
+            }
+            else
+            {
+                Title = "Sharp";
+                Tooltip = "Prototype: use Smart Client's digital zoom so the dewarped view samples more detail.";
+            }
         }
 
         public override void OnIsCheckedChanged()
@@ -59,7 +82,10 @@ namespace FisheyeDewarp
                 Log.Error($"No tile found for window={_windowId} index={_index}. Known tiles: {DewarpBackgroundPlugin.DescribeAll()}");
                 return;
             }
-            if (!session.SetEnabled(IsChecked) && IsChecked) IsChecked = false;
+            if (_kind == ToolbarKind.Sharp)
+                session.SetSharp(IsChecked);
+            else if (!session.SetEnabled(IsChecked) && IsChecked)
+                IsChecked = false;
         }
 
         public override void Close()

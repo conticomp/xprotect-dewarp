@@ -20,6 +20,7 @@ namespace FisheyeDewarp
         //   c4      fisheye circle (centerX, centerY, radiusX, radiusY) in normalized image coordinates
         //   c5      where the video image sits inside the effect input (x, y, w, h), normalized 0..1
         //   c6      where to draw the dewarped output (x, y, w, h), normalized 0..1
+        //   c7      part of the fisheye image currently shown by Smart Client's digital zoom (x, y, w, h), normalized image coordinates
         private const string Hlsl = @"
 sampler2D input : register(s0);
 float4 m0 : register(c0);
@@ -29,6 +30,7 @@ float4 lens : register(c3);
 float4 circle : register(c4);
 float4 area : register(c5);
 float4 outRect : register(c6);
+float4 zoom : register(c7);
 
 float4 main(float2 uv : TEXCOORD) : COLOR
 {
@@ -48,7 +50,10 @@ float4 main(float2 uv : TEXCOORD) : COLOR
     float len = length(d.xy);
     float2 dir = len > 1e-6 ? d.xy / len : float2(0, 0);
     float2 img = circle.xy + dir * rn * circle.zw;
-    float2 src = area.xy + img * area.zw;
+    float2 shown = (img - zoom.xy) / zoom.zw;
+    if (shown.x < 0 || shown.y < 0 || shown.x > 1 || shown.y > 1)
+        return float4(0.15, 0, 0, 1);
+    float2 src = area.xy + shown * area.zw;
     return tex2Dlod(input, float4(src, 0, 0));
 }";
 
@@ -96,6 +101,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
             UpdateShaderValue(CircleProperty);
             UpdateShaderValue(AreaProperty);
             UpdateShaderValue(OutputRectProperty);
+            UpdateShaderValue(ZoomProperty);
         }
 
         public static readonly DependencyProperty InputProperty =
@@ -108,6 +114,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         public static readonly DependencyProperty CircleProperty = Constant("Circle", 4, new Point4D(0.5, 0.5, 0.5, 0.5));
         public static readonly DependencyProperty AreaProperty = Constant("Area", 5, new Point4D(0, 0, 1, 1));
         public static readonly DependencyProperty OutputRectProperty = Constant("OutputRect", 6, new Point4D(0, 0, 1, 1));
+        public static readonly DependencyProperty ZoomProperty = Constant("Zoom", 7, new Point4D(0, 0, 1, 1));
 
         private static DependencyProperty Constant(string name, int register, Point4D defaultValue) =>
             DependencyProperty.Register(name, typeof(Point4D), typeof(DewarpEffect),
@@ -130,6 +137,9 @@ float4 main(float2 uv : TEXCOORD) : COLOR
 
         public void SetArea(Rect normalized) =>
             SetValue(AreaProperty, new Point4D(normalized.X, normalized.Y, normalized.Width, normalized.Height));
+
+        public void SetZoom(Rect normalized) =>
+            SetValue(ZoomProperty, new Point4D(normalized.X, normalized.Y, normalized.Width, normalized.Height));
 
         public void SetOutputRect(Rect normalized) =>
             SetValue(OutputRectProperty, new Point4D(normalized.X, normalized.Y, normalized.Width, normalized.Height));

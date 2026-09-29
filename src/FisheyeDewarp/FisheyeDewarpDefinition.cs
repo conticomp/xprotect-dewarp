@@ -26,7 +26,8 @@ namespace FisheyeDewarp
             if (EnvironmentManager.Instance.EnvironmentType != EnvironmentType.SmartClient) return;
             Log.Info($"Plugin loading. Smart Client environment, CLR {Environment.Version}");
             _backgroundPlugins.Add(new DewarpBackgroundPlugin());
-            _toolbarPlugins.Add(new DewarpToolbarPlugin());
+            _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Dewarp));
+            _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Sharp));
         }
 
         public override void Close()

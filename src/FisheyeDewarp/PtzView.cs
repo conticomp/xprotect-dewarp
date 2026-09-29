@@ -1,4 +1,5 @@
 using System;
+using System.Windows;
 
 namespace FisheyeDewarp
 {
@@ -71,6 +72,38 @@ namespace FisheyeDewarp
                 ? new double[,] { { cp, -sp, 0 }, { sp, cp, 0 }, { 0, 0, 1 } }   // around the lens axis
                 : new double[,] { { cp, 0, sp }, { 0, 1, 0 }, { -sp, 0, cp } };  // around world vertical
             return Multiply(pan, pitch);
+        }
+
+        /// <summary>
+        /// Smallest part of the fisheye image (normalized 0..1) that the current view samples from.
+        /// Mirrors the shader math on a grid of output points.
+        /// </summary>
+        public Rect SourceRegion(double aspect, double lensHalfFov)
+        {
+            double[,] m = Rotation();
+            double tanX = Math.Tan(Fov / 2), tanY = tanX / aspect;
+            double minX = 1, minY = 1, maxX = 0, maxY = 0;
+            const int steps = 12;
+            for (int i = 0; i <= steps; i++)
+            {
+                for (int j = 0; j <= steps; j++)
+                {
+                    double sx = (i / (double)steps * 2 - 1) * tanX, sy = (j / (double)steps * 2 - 1) * tanY;
+                    double n = Math.Sqrt(sx * sx + sy * sy + 1);
+                    double vx = sx / n, vy = sy / n, vz = 1 / n;
+                    double dx = m[0, 0] * vx + m[0, 1] * vy + m[0, 2] * vz;
+                    double dy = m[1, 0] * vx + m[1, 1] * vy + m[1, 2] * vz;
+                    double dz = m[2, 0] * vx + m[2, 1] * vy + m[2, 2] * vz;
+                    double theta = Math.Acos(Clamp(dz, -1, 1));
+                    double rn = Math.Min(Math.Tan(theta / 2) / Math.Tan(lensHalfFov / 2), 1);
+                    double len = Math.Sqrt(dx * dx + dy * dy);
+                    double ix = 0.5 + (len > 1e-9 ? dx / len : 0) * rn * 0.5;
+                    double iy = 0.5 + (len > 1e-9 ? dy / len : 0) * rn * 0.5;
+                    minX = Math.Min(minX, ix); maxX = Math.Max(maxX, ix);
+                    minY = Math.Min(minY, iy); maxY = Math.Max(maxY, iy);
+                }
+            }
+            return new Rect(new Point(minX, minY), new Point(maxX, maxY));
         }
 
         public override string ToString() =>
