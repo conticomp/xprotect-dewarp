@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>FisheyeDewarp</AssemblyName>
+    <RootNamespace>FisheyeDewarp</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Match the customer's Smart Client (2025 R2). Smart Client supplies these assemblies at runtime. -->
+    <PackageReference Include="MilestoneSystems.VideoOS.Platform" Version="25.2.3" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <None Update="plugin.def" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
