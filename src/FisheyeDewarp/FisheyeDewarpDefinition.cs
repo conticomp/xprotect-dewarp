@@ -30,6 +30,7 @@ namespace FisheyeDewarp
             _backgroundPlugins.Add(new DewarpBackgroundPlugin());
             _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Dewarp));
             _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Snapshot));
+            _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Export));
         }
 
         public override void Close()

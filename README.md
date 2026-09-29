@@ -10,7 +10,8 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 > **Prototype, provided as is.** This is early-stage software (version 0.x). It has been tested on one Smart Client
 > installation with one camera model. It is provided **"AS IS", without warranty of any kind**, express or implied (see [LICENSE](LICENSE)).
 > Test it in your own environment before relying on it. Do not use it as the only means of reviewing video for safety-critical or
-> evidential purposes. Export evidence with XProtect's own tools.
+> evidential purposes. Export evidence with XProtect's own tools. A dewarped export is a derived view of the recording; keep the
+> original fisheye export as the evidence copy.
 
 > [!NOTE]
 > This project is not affiliated with, endorsed by, or supported by Milestone Systems or Axis Communications. "Milestone", "XProtect"
@@ -26,8 +27,10 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
   so detail is comparable to Axis Optimizer.
 - **Dewarped snapshot to clipboard.** One click copies the current dewarped view to the clipboard at up to the camera's native
   detail, ready to paste into a report or email.
-- **No extra video streams.** The plugin uses the frames Smart Client already receives. It does not open its own connections to
-  the recording server.
+- **Dewarped video export to MP4.** Export the tile's dewarped view for a time range, with an optional burned-in camera name and
+  timestamp. It checks the user's export permission and writes an XProtect audit log entry.
+- **No extra video streams for viewing.** Live and playback dewarping use the frames Smart Client already receives. Only an export
+  opens its own playback connections to the recording server, while it runs.
 
 ## Requirements
 
@@ -36,6 +39,7 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 | XProtect | Smart Client **2025 R2** (tested). Other versions from 2022 R3 onward may work, but are untested. |
 | Windows | 64-bit Windows 10 or 11 with .NET Framework 4.8 (included with current Windows). |
 | Graphics | A GPU that supports Pixel Shader 3.0 (any GPU from the last decade). Remote Desktop sessions use software rendering and will be slow. Test at the physical PC. |
+| Export | Windows Media Foundation, included with Windows 10 and 11. **Windows N** editions need the free Media Feature Pack. **Windows Server** needs the Media Foundation feature (`Install-WindowsFeature Server-Media-Foundation`, then restart). Uses the GPU's H.264 encoder when present, otherwise Windows' software encoder. |
 | Camera | Ceiling-mounted fisheye with a stereographic 182° lens. It was tuned for the **Axis M4328-P** and tested with an **Axis M3058**. |
 | To build (optional) | [.NET SDK](https://dotnet.microsoft.com/download) 8 or later (the SDK only; Visual Studio is not needed). Not needed if you install a release. |
 
@@ -60,8 +64,8 @@ The plugin is installed on each Smart Client workstation.
    ```
    The script copies the plugin to `C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp` and unblocks the files.
 6. Start Smart Client and log in.
-7. Check that the plugin loaded: open a fisheye camera and hover over the tile. A **Dewarp** button (a circle icon) and a **Dewarped snapshot**
-   button (a camera icon) should appear on the tile's toolbar. If they are missing, see [Troubleshooting](#troubleshooting).
+7. Check that the plugin loaded: open a fisheye camera and hover over the tile. A **Dewarp** button (a circle icon), a **Dewarped snapshot**
+   button (a camera icon) and an **Export dewarped video** button (a screen with an arrow) should appear on the tile's toolbar. If they are missing, see [Troubleshooting](#troubleshooting).
 
 To **upgrade**, repeat these steps with the new release. To **uninstall**, close Smart Client and run
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall` as administrator.
@@ -102,9 +106,28 @@ powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -StartClient # ...and star
 | Zoom in or out | Scroll the mouse wheel |
 | Reset the view | Double-click the tile |
 | Copy the dewarped view | Click **Dewarped snapshot**, then paste (Ctrl+V) into Word, Outlook, Paint, etc. |
+| Export the dewarped view as video | Click **Export dewarped video** (see below) |
 
 While dewarping is on, Smart Client's own digital zoom is turned off for that tile, so the two don't fight over the mouse. It comes back
 when you turn dewarping off.
+
+### Exporting dewarped video
+
+1. Turn on **Dewarp** on the tile and aim the view at what you want to export.
+2. Click **Export dewarped video**. A window opens next to Smart Client. It does not block Smart Client, so you can keep using the
+   timeline.
+3. Set **Start** and **End**. They default to 30 seconds either side of the frame on screen. To use the time shown in the tile, scrub
+   the timeline to it and press **Displayed time** next to Start or End.
+4. Choose the width (**1920** or **1280** pixels; the height follows the tile's shape), whether to burn in the camera name and time, and
+   the folder. The default folder is `Videos\Dewarp exports`.
+5. Press **Export**. The view is taken from the tile at that moment, and the video shows exactly what the tile shows. A progress bar
+   appears; **Cancel** stops the export and removes the unfinished file. When it finishes, **Show file** opens the folder.
+
+Files are named `<camera> <start time> dewarped.mp4`, with `(2)`, `(3)`... added rather than overwriting an existing file. The video
+keeps the recording's real frame times, so it plays at the camera's recorded frame rate.
+
+If the user does not have XProtect's **Export** permission on the camera, the window does not open, and the attempt is recorded in the
+audit log. Each completed export is also recorded (camera, time range, file, user).
 
 ## Known limitations
 
@@ -117,7 +140,12 @@ when you turn dewarping off.
 - **Black bars at the sides.** The dewarped view is drawn inside the square area where Smart Client shows the fisheye image. In the view's
   Setup you can try turning off the camera tile's "keep aspect ratio" option, so the image fills the whole tile.
 - **The view is not saved.** It resets when the view or Smart Client is reopened, and there are no presets yet.
-- **No dewarped export yet.** Use the snapshot button for stills. Export the original fisheye video with XProtect's normal export.
+- **One view per export.** An export uses a single fixed view for its whole time range. Following a moving subject means several exports,
+  or exporting a wider view.
+- **Export speed.** Fetching recorded frames is limited by round trips to the recording server, so the export splits the range into
+  up to six parts that run in parallel. On a test PC, 60 s of 8 fps video took about 20 s. Expect roughly real time or faster; a long
+  range at a high frame rate takes a while. Each running export opens up to six playback connections to the recording server.
+- **Exports are limited to 4 hours** per export.
 - **Snapshots are not audited.** They are copied to the clipboard without an XProtect audit log entry or export-permission check. If your
   organisation requires audited exports, account for this before deploying.
 - **CPU use** grows with the number of dewarped tiles, since each one is re-rendered on the CPU. Test with your typical number of tiles.
@@ -135,6 +163,8 @@ The plugin writes a log to:
 | No Dewarp button | The files are in `C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp`, they are unblocked, and Smart Client was restarted. If the log file was never created, Smart Client did not load the plugin. |
 | The button does nothing | Look in the log for `Shader compile failed` or `No tile found`. |
 | The image is soft for a moment | This is expected right after turning Dewarp on or resizing the tile, until the first full-resolution frame arrives. |
+| Export fails with "Media Foundation is not installed" | Windows N: install the Media Feature Pack. Windows Server: `Install-WindowsFeature Server-Media-Foundation`, then restart. |
+| Export says there is no recorded video | Check the time range in Playback; the camera may not have recorded then. |
 | Slow over Remote Desktop | Expected, because RDP uses software rendering. Evaluate at the physical workstation. |
 
 ## Uninstall
@@ -164,6 +194,11 @@ comes from the tag.
   Smart Client is already drawing. It is instant, but limited to the tile's resolution.
 - **Sharp view:** the plugin grabs the full-resolution decoded frame in the background, dewarps it on the CPU with the same lens math, and
   shows it on top of the fast view. While the operator steers, it re-dewarps the frame already in hand (about 15–30 ms per render).
+- **Export:** the range is split into up to six parts, each on its own thread with its own `BitmapVideoSource`, which fetches the recorded
+  frames at full resolution. A lookup table built once per export dewarps each frame. The camera name and time are drawn with GDI+,
+  and Windows Media Foundation encodes H.264 into a temporary MP4. The parts are then joined into one MP4 without re-encoding, keeping
+  the recording's timestamps. All parts use the same encoder, with no B-frames, so they join cleanly: the GPU encoder when available,
+  otherwise all parts in software.
 - **Lens model:** stereographic projection, `r = 2f·tan(θ/2)`. The virtual camera is `Rz(pan) · Rx(tilt)` for ceiling mounts.
 
 ## License

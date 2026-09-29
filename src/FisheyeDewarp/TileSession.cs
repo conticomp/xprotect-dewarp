@@ -49,6 +49,10 @@ namespace FisheyeDewarp
         private int _grabLogs;
         private DateTime _lastWheel;
 
+        // Latest frame the tile showed, for the export's default times and source size.
+        private DateTime _lastImageTime;
+        private System.Drawing.Size _originalSize;
+
         public TileSession(ImageViewerAddOn addOn)
         {
             _addOn = addOn;
@@ -199,6 +203,42 @@ namespace FisheyeDewarp
                 Log.Error($"Snapshot failed for {Describe()}", ex);
                 ShowToast("Snapshot failed");
             }
+        }
+
+        /// <summary>The camera shown in this tile, or null if it is not known yet.</summary>
+        public VideoOS.Platform.Item Camera => _addOn.CameraFQID == null ? null : VideoOS.Platform.Configuration.Instance.GetItem(_addOn.CameraFQID);
+
+        /// <summary>Recording time of the frame on screen (UTC), or null before the first frame.</summary>
+        public DateTime? DisplayedTimeUtc =>
+            _lastImageTime == default ? (DateTime?)null
+            : _lastImageTime.Kind == DateTimeKind.Local ? _lastImageTime.ToUniversalTime()
+            : DateTime.SpecifyKind(_lastImageTime, DateTimeKind.Utc);
+
+        /// <summary>The camera's full frame size, from the last frame shown.</summary>
+        public System.Drawing.Size SourceSize => _originalSize;
+
+        public double LensHalfFovRadians => LensHalfFov;
+
+        /// <summary>Width / height of the tile's picture, so an export frames exactly what the operator sees.</summary>
+        public double TileAspect
+        {
+            get
+            {
+                Size paint = _addOn.PaintSizeWpf;
+                return paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
+            }
+        }
+
+        /// <summary>The Smart Client window holding this tile, to own dialogs.</summary>
+        public Window OwnerWindow => (_input != null ? Window.GetWindow(_input) : null) ?? Application.Current?.MainWindow;
+
+        /// <summary>The current virtual PTZ view, for an export. False when dewarp is off.</summary>
+        public bool TryGetView(out double[,] rotation, out double horizontalFov)
+        {
+            rotation = Enabled ? _view.Rotation() : null;
+            horizontalFov = _view.Fov;
+            if (Enabled) Log.Info($"Export view {_view} {Describe()}");
+            return Enabled;
         }
 
         /// <summary>
@@ -425,6 +465,8 @@ namespace FisheyeDewarp
 
         private void OnImageDisplayed(object sender, ImageDisplayedEventArgs e)
         {
+            _lastImageTime = e.ImageTime;
+            _originalSize = new System.Drawing.Size((int)e.OriginalImageSize.Width, (int)e.OriginalImageSize.Height);
             if (!Enabled) return;
             if (_imageEventsLogged < 3)
             {
