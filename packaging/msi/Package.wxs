@@ -1,0 +1,38 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- The UpgradeCode must never change: it is how a newer MSI finds and replaces an older install. -->
+  <Package Name="Fisheye Dewarp for XProtect Smart Client"
+           Manufacturer="Continental Computers"
+           Version="$(ProductVersion)"
+           UpgradeCode="25962AE3-BFFE-4D1A-8FD0-CAC463CC5693"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/conticomp/xprotect-dewarp" />
+
+    <!-- Same folder as install.ps1 uses, so the two install methods stay interchangeable. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="MilestoneFolder" Name="Milestone">
+        <Directory Id="MIPPluginsFolder" Name="MIPPlugins">
+          <Directory Id="INSTALLFOLDER" Name="FisheyeDewarp" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="PluginFiles" Directory="INSTALLFOLDER">
+      <File Source="$(BinDir)FisheyeDewarp.dll" />
+      <File Source="$(BinDir)FisheyeDewarp.pdb" />
+      <File Source="$(BinDir)plugin.def" />
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="PluginFiles" />
+    </Feature>
+
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <ui:WixUI Id="WixUI_Minimal" />
+  </Package>
+
+</Wix>

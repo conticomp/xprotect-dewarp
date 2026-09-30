@@ -47,7 +47,30 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 
 The plugin is installed on each Smart Client workstation.
 
-### Option A: install a release (recommended)
+### Option A: install with the MSI (recommended)
+
+1. On the workstation, open the [**Releases**](https://github.com/conticomp/xprotect-dewarp/releases) page and download
+   `FisheyeDewarp-<version>.msi` from the latest release. *(Optional)* Check it against the `.sha256` file published with it.
+2. **Close Smart Client.** If it is still open, the installer asks you to close it.
+3. Double-click the MSI, accept the license and click **Install**. Windows asks for administrator approval.
+   If SmartScreen shows "Windows protected your PC", click **More info**, then **Run anyway** (the installer is not code-signed yet).
+4. Start Smart Client and check for the tile buttons as in step 7 of Option B.
+
+The plugin appears in **Settings › Apps** (Add/Remove Programs) as **Fisheye Dewarp for XProtect Smart Client**. To **upgrade**, run the
+newer MSI; it replaces the old version. To **uninstall**, remove it there.
+
+**Silent install for IT** (GPO, Intune, SCCM, PDQ and similar), from an elevated prompt, with Smart Client closed:
+
+```powershell
+msiexec /i FisheyeDewarp-<version>.msi /qn /norestart     # install or upgrade
+msiexec /x FisheyeDewarp-<version>.msi /qn /norestart     # uninstall
+```
+
+If Smart Client is still running during a silent install, Windows may replace the plugin only after the next restart.
+
+### Option B: install with PowerShell
+
+Use this if you can't run MSIs. Both options install to the same folder; use one method per PC so Add/Remove Programs stays accurate.
 
 1. On the workstation, open the [**Releases**](https://github.com/conticomp/xprotect-dewarp/releases) page and download
    `FisheyeDewarp-<version>.zip` from the latest release.
@@ -72,9 +95,9 @@ To **upgrade**, repeat these steps with the new release. To **uninstall**, close
 
 > [!NOTE]
 > The DLL is not code-signed. Windows or your antivirus may warn about it. If your organisation requires signed plugins, build it
-> yourself (Option B) and sign it with your own certificate.
+> yourself (Option C) and sign it with your own certificate.
 
-### Option B: build from source
+### Option C: build from source
 
 1. Install the [.NET SDK](https://dotnet.microsoft.com/download) 8 or later on a build PC. This can be any Windows PC; it does not need XProtect.
 2. Clone or download this repository and build:
@@ -84,7 +107,7 @@ To **upgrade**, repeat these steps with the new release. To **uninstall**, close
    dotnet build src\FisheyeDewarp\FisheyeDewarp.csproj -c Release
    ```
 3. Copy `FisheyeDewarp.dll`, `FisheyeDewarp.pdb` and `plugin.def` from `src\FisheyeDewarp\bin\Release\net48\`, together with
-   `packaging\install.ps1`, into one folder. Then follow steps 4–7 of Option A.
+   `packaging\install.ps1`, into one folder. Then follow steps 4–7 of Option B.
 
 ### Developer shortcut
 
@@ -169,13 +192,15 @@ The plugin writes a log to:
 
 ## Uninstall
 
-Close Smart Client and run `install.ps1 -Uninstall` as administrator (see above), or delete
+If you installed with the MSI, remove **Fisheye Dewarp for XProtect Smart Client** in **Settings › Apps**. If you used PowerShell,
+close Smart Client and run `install.ps1 -Uninstall` as administrator (see above), or delete
 `C:\Program Files\Milestone\MIPPlugins\FisheyeDewarp`. To remove the log as well, delete
 `%LOCALAPPDATA%\FisheyeDewarp`.
 
 ## Releases and builds
 
-GitHub Actions builds the plugin on every push and pull request; the zip is available under the run's **Artifacts** for testing.
+GitHub Actions builds the plugin on every push and pull request, packages it as a zip and as an MSI, and tests the MSI (install,
+upgrade, refused downgrade, uninstall). Both are available under the run's **Artifacts** for testing.
 Pushing a version tag publishes a release:
 
 ```powershell
@@ -184,7 +209,7 @@ git push origin v0.2.0
 ```
 
 Tags with a suffix (for example `v0.2.0-beta.1`) are published as pre-releases. The plugin's version, shown in Smart Client's plugin list,
-comes from the tag.
+comes from the tag. The MSI uses the tag without its suffix (`v0.2.0-beta.1` → 0.2.0), because MSI versions must be plain numbers.
 
 ## How it works
 
