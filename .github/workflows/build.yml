@@ -70,7 +70,7 @@ jobs:
           $hash = (Get-FileHash "out/$name.msi" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.msi" | Set-Content "out/$name.msi.sha256" -Encoding ascii
           # A second MSI with a higher version, only for the upgrade test below.
-          dotnet build $wixproj -c Release -p:ProductVersion=${{ steps.version.outputs.msi_upgrade_version }} -p:BinDir=$bin -o out/msi-upgrade
+          dotnet build $wixproj -c Release --no-incremental -p:ProductVersion=${{ steps.version.outputs.msi_upgrade_version }} -p:BinDir=$bin -o out/msi-upgrade
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Test MSI

@@ -44,6 +44,7 @@ function Get-MsiVersion([string]$Path) {
 
 $version = Get-MsiVersion $Msi
 $upgradeVersion = Get-MsiVersion $UpgradeMsi
+if ([version]$upgradeVersion -le [version]$version) { throw "The upgrade MSI ($upgradeVersion) must have a higher version than $version" }
 
 Write-Host "Install $version"
 $code = Invoke-Msiexec '/i' $Msi 'install.log'
