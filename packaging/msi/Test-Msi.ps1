@@ -35,10 +35,10 @@ function Get-MsiVersion([string]$Path) {
     $installer = New-Object -ComObject WindowsInstaller.Installer
     $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @((Resolve-Path $Path).Path, 0))
     $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT Value FROM Property WHERE Property='ProductVersion'"))
-    $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+    $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
     $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
     $version = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
-    $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+    $null = $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
     return $version
 }
 
