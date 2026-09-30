@@ -1,7 +1,8 @@
 name: Build
 
-# Every push and pull request builds the plugin and keeps the zip as a run artifact.
-# Pushing a tag like v0.1.0 also publishes a GitHub Release with the zip attached.
+# Every push and pull request builds the plugin once, packages it as a zip (install.ps1) and as an MSI,
+# tests the MSI (install, upgrade, downgrade, uninstall) and keeps both as run artifacts.
+# Pushing a tag like v0.1.0 also publishes a GitHub Release with both attached.
 on:
   push:
     branches: ['**']
@@ -16,9 +17,9 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
@@ -28,8 +29,16 @@ jobs:
         run: |
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME.TrimStart('v') }
           else { $v = "0.0.0-ci.$env:GITHUB_RUN_NUMBER+$($env:GITHUB_SHA.Substring(0,7))" }
+          # MSI versions must be plain major.minor.build: tags drop any suffix (1.2.3-beta.1 -> 1.2.3),
+          # other builds use 0.0.<run number>. The upgrade test needs a second, higher version.
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $msi = ($v -split '[-+]')[0] }
+          else { $msi = "0.0.$env:GITHUB_RUN_NUMBER" }
+          $parts = $msi.Split('.')
+          $msiUpgrade = "$($parts[0]).$($parts[1]).$([int]$parts[2] + 1)"
           "version=$v" >> $env:GITHUB_OUTPUT
-          "Version: $v"
+          "msi_version=$msi" >> $env:GITHUB_OUTPUT
+          "msi_upgrade_version=$msiUpgrade" >> $env:GITHUB_OUTPUT
+          "Version: $v, MSI version: $msi"
 
       - name: Build
         run: dotnet build src/FisheyeDewarp/FisheyeDewarp.csproj -c Release -p:Version=${{ steps.version.outputs.version }}
@@ -49,10 +58,41 @@ jobs:
           "$hash  $name.zip" | Set-Content "out/$name.zip.sha256" -Encoding ascii
           "name=$name" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v4
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $name = '${{ steps.package.outputs.name }}'
+          $bin = "$PWD/src/FisheyeDewarp/bin/Release/net48/"
+          $wixproj = 'packaging/msi/FisheyeDewarp.Msi.wixproj'
+          dotnet build $wixproj -c Release -p:ProductVersion=${{ steps.version.outputs.msi_version }} -p:BinDir=$bin -o out/msi
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Move-Item out/msi/FisheyeDewarp.msi "out/$name.msi"
+          $hash = (Get-FileHash "out/$name.msi" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.msi" | Set-Content "out/$name.msi.sha256" -Encoding ascii
+          # A second MSI with a higher version, only for the upgrade test below.
+          dotnet build $wixproj -c Release --no-incremental -p:ProductVersion=${{ steps.version.outputs.msi_upgrade_version }} -p:BinDir=$bin -o out/msi-upgrade
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Test MSI
+        shell: pwsh
+        run: packaging/msi/Test-Msi.ps1 -Msi "out/${{ steps.package.outputs.name }}.msi" -UpgradeMsi out/msi-upgrade/FisheyeDewarp.msi
+
+      - name: Keep MSI test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: msi-test-logs
+          path: packaging/msi/test-logs/
+
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.name }}
           path: out/${{ steps.package.outputs.name }}/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}-msi
+          path: out/${{ steps.package.outputs.name }}.msi
 
       - name: Publish release
         if: github.ref_type == 'tag'
@@ -61,6 +101,6 @@ jobs:
         shell: pwsh
         run: |
           $name = '${{ steps.package.outputs.name }}'
-          $releaseArgs = @($env:GITHUB_REF_NAME, "out/$name.zip", "out/$name.zip.sha256", '--title', "Fisheye Dewarp $env:GITHUB_REF_NAME", '--generate-notes')
+          $releaseArgs = @($env:GITHUB_REF_NAME, "out/$name.zip", "out/$name.zip.sha256", "out/$name.msi", "out/$name.msi.sha256", '--title', "Fisheye Dewarp $env:GITHUB_REF_NAME", '--generate-notes')
           if ('${{ steps.version.outputs.version }}' -match '-') { $releaseArgs += '--prerelease' }   # e.g. v0.1.0-beta.1
           gh release create @releaseArgs

@@ -3,3 +3,5 @@ obj/
 .vs/
 *.user
 images/
+out/
+packaging/msi/test-logs/

@@ -1,0 +1,21 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+
+  <!--
+    Builds FisheyeDewarp-<version>.msi from an already built plugin:
+      dotnet build packaging\msi\FisheyeDewarp.Msi.wixproj -c Release -p:ProductVersion=1.2.3 -p:BinDir=<folder with FisheyeDewarp.dll>
+    WiX v5 on purpose: v6 and later need the Open Source Maintenance Fee for commercial use.
+  -->
+  <PropertyGroup>
+    <OutputName>FisheyeDewarp</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <!-- MSI versions are plain major.minor.build, each part at most 255.255.65535. -->
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
+    <BinDir Condition="'$(BinDir)' == ''">$(MSBuildThisFileDirectory)..\..\src\FisheyeDewarp\bin\Release\net48\</BinDir>
+    <DefineConstants>ProductVersion=$(ProductVersion);BinDir=$(BinDir)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+</Project>
