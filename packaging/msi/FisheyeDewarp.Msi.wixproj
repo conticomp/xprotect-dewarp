@@ -11,7 +11,8 @@
     <!-- MSI versions are plain major.minor.build, each part at most 255.255.65535. -->
     <ProductVersion Condition="'$(ProductVersion)' == ''">0.0.0</ProductVersion>
     <BinDir Condition="'$(BinDir)' == ''">$(MSBuildThisFileDirectory)..\..\src\FisheyeDewarp\bin\Release\net48\</BinDir>
-    <DefineConstants>ProductVersion=$(ProductVersion);BinDir=$(BinDir)</DefineConstants>
+    <RepoDir>$(MSBuildThisFileDirectory)..\..\</RepoDir>
+    <DefineConstants>ProductVersion=$(ProductVersion);BinDir=$(BinDir);RepoDir=$(RepoDir)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

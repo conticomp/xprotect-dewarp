@@ -52,7 +52,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           $bin = 'src/FisheyeDewarp/bin/Release/net48'
           Copy-Item "$bin/FisheyeDewarp.dll", "$bin/FisheyeDewarp.pdb", "$bin/plugin.def" $stage
-          Copy-Item packaging/install.ps1, README.md, LICENSE $stage
+          Copy-Item packaging/install.ps1, README.md, LICENSE, NOTICE $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "out/$name.zip"
           $hash = (Get-FileHash "out/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Set-Content "out/$name.zip.sha256" -Encoding ascii

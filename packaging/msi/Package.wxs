@@ -25,6 +25,9 @@
       <File Source="$(BinDir)FisheyeDewarp.dll" />
       <File Source="$(BinDir)FisheyeDewarp.pdb" />
       <File Source="$(BinDir)plugin.def" />
+      <!-- Apache 2.0 requires the license and NOTICE to travel with every copy. -->
+      <File Source="$(RepoDir)LICENSE" Name="LICENSE.txt" />
+      <File Source="$(RepoDir)NOTICE" Name="NOTICE.txt" />
     </ComponentGroup>
 
     <Feature Id="Main">

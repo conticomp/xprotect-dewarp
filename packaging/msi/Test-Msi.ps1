@@ -7,7 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $target = Join-Path $env:ProgramFiles 'Milestone\MIPPlugins\FisheyeDewarp'
-$files = 'FisheyeDewarp.dll', 'FisheyeDewarp.pdb', 'plugin.def'
+$files = 'FisheyeDewarp.dll', 'FisheyeDewarp.pdb', 'plugin.def', 'LICENSE.txt', 'NOTICE.txt'
 $logDir = Join-Path $PSScriptRoot 'test-logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
