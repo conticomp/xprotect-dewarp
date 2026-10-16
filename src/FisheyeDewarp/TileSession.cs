@@ -558,6 +558,7 @@ namespace FisheyeDewarp
                     Log.Info($"Frame grab recovered after {_grabFailures} failure(s) for {Describe()}");
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
+                if (LiveFeeding) return;   // a decoded frame newer than this grab is already showing
                 _frame = frame;
                 RenderStill();
             };
@@ -596,12 +597,12 @@ namespace FisheyeDewarp
             if (_live == null || _originalSize.IsEmpty) return;
             Rect need = ViewBounds();
             if (need.IsEmpty) return;
-            double needArea = need.Width * need.Height, cropArea = _crop.Width * _crop.Height;
-            if (_crop.Contains(need) && needArea > 0.3 * cropArea) return;
-
-            need.Inflate(Math.Max(0.04, need.Width * 0.3), Math.Max(0.04, need.Height * 0.3));
-            need.Intersect(WholeImage);
-            _crop = need;
+            Rect fresh = need;
+            fresh.Inflate(Math.Max(0.04, need.Width * 0.3), Math.Max(0.04, need.Height * 0.3));
+            fresh.Intersect(WholeImage);
+            // Keep the current crop while it covers the view and is not much larger than a fresh one would be.
+            if (_crop.Contains(need) && _crop.Width * _crop.Height <= 2 * fresh.Width * fresh.Height) return;
+            _crop = fresh;
             _live.SetCrop(_crop);
             if (_cropLogs++ < 10)
                 Log.Info($"Live decode crop {_crop.X:F3},{_crop.Y:F3} {_crop.Width:F3}x{_crop.Height:F3} ({_crop.Width * _crop.Height * 100:F0}% of the image) for {_view}");
@@ -633,6 +634,7 @@ namespace FisheyeDewarp
             {
                 _live.Dispose();
                 _live = null;
+                _lastLiveFrameUtc = default;
                 _liveRefused = true;
                 _frameStale = true;
             }
@@ -652,6 +654,7 @@ namespace FisheyeDewarp
                 decoder = LiveDecoder.Start(camera, _addOn.StreamId, _originalSize, frame =>
                     dispatcher.BeginInvoke(new Action(() => OnLiveFrame(decoder, frame))));
                 _live = decoder;
+                _lastLiveFrameUtc = default;
                 _liveRefused = decoder == null;
                 _crop = WholeImage;
                 _cropLogs = 0;
@@ -661,12 +664,15 @@ namespace FisheyeDewarp
                 _liveRefused = false;
                 _live?.Dispose();
                 _live = null;
+                _lastLiveFrameUtc = default;
             }
         }
 
         private void OnLiveFrame(LiveDecoder from, SourceFrame frame)
         {
-            if (_live != from || !Enabled) return;
+            from.Delivered();
+            UpdateLiveDecoder();   // a switch to Playback shows up here first: the decode keeps delivering until stopped
+            if (_live != from) return;
             _lastLiveFrameUtc = DateTime.UtcNow;
             _frame = frame;
             _frameStale = false;

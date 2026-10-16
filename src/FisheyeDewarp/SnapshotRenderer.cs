@@ -305,7 +305,9 @@ namespace FisheyeDewarp
         {
             double x = ix * _scaleX - _offsetX;
             double y = iy * _scaleY - _offsetY;
-            if (x < -1 || y < -1 || x > Width || y > Height) return 0;   // only reachable on a cropped frame
+            // The frame's pixels cover -0.5..Width-0.5; outside that (only possible on a cropped frame) is transparent.
+            const double Edge = 0.5 + 1e-3;
+            if (x < -Edge || y < -Edge || x > Width - 1 + Edge || y > Height - 1 + Edge) return 0;
             x = Math.Max(0, Math.Min(Width - 1.001, x));
             y = Math.Max(0, Math.Min(Height - 1.001, y));
             return _luma != null ? SampleYuv(x, y) : SampleBgra(x, y);
