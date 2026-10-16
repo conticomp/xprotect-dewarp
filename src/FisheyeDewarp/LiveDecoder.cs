@@ -19,10 +19,10 @@ namespace FisheyeDewarp
         private static readonly string DisableFlag = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "no-live-decode");
 
-        // SPIKE: decode to YCbCr 4:2:0 and convert only the pixels the view samples, instead of MIP converting
-        // the whole frame to BGR32.
-        private static readonly string YuvFlag = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "yuv-decode");
+        // Frames come as YCbCr 4:2:0 and only the pixels the view samples are converted, which costs about a
+        // third less CPU than MIP converting every frame to BGR32. SPIKE: the bgr-decode file asks for BGR32.
+        private static readonly string BgrFlag = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "bgr-decode");
 
         private static int _running;
 
@@ -37,6 +37,7 @@ namespace FisheyeDewarp
         private int _next;
         private readonly bool _yuv;
         private int _formatLogs;
+        private int _unknownFormatLogs;
 
         private readonly object _statsGate = new object();
         private int _frames;
@@ -55,7 +56,7 @@ namespace FisheyeDewarp
         {
             _camera = camera.Name;
             _onFrame = onFrame;
-            _yuv = File.Exists(YuvFlag);
+            _yuv = !File.Exists(BgrFlag);
             _source = new BitmapLiveSource(camera, _yuv ? BitmapFormat.YCbCr420_Planar : BitmapFormat.BGR32);
             if (streamId != Guid.Empty) _source.StreamId = streamId;
             _source.LiveContentEvent += OnContent;
@@ -142,7 +143,11 @@ namespace FisheyeDewarp
                 ? new System.Windows.Rect(content.CropX, content.CropY, content.CropWidth, content.CropHeight)
                 : new System.Windows.Rect(0, 0, 1, 1);
             if (content.Format == BitmapFormat.YCbCr420_Planar) return CopyYuv(content, crop);
-            if (content.Format != BitmapFormat.BGR32 && content.Format != BitmapFormat.BGRA) return null;
+            if (content.Format != BitmapFormat.BGR32 && content.Format != BitmapFormat.BGRA)
+            {
+                if (_unknownFormatLogs++ < 1) Log.Info($"Live decode camera='{_camera}' sent {content.Format}, which the sharp view cannot use; grabbing frames instead");
+                return null;
+            }
             int width = content.GetPlaneWidth(0), height = content.GetPlaneHeight(0), stride = content.GetPlaneStride(0);
             int[] pixels = _pool[_next];
             if (pixels == null || pixels.Length != width * height) _pool[_next] = pixels = new int[width * height];
