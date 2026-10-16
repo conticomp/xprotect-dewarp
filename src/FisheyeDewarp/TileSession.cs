@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -52,6 +53,8 @@ namespace FisheyeDewarp
         // Latest frame the tile showed, for the export's default times and source size.
         private DateTime _lastImageTime;
         private System.Drawing.Size _originalSize;
+        private (DateTime Start, DateTime End)? _loggedSelection;
+        private string _loggedSelectionError;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -210,9 +213,57 @@ namespace FisheyeDewarp
 
         /// <summary>Recording time of the frame on screen (UTC), or null before the first frame.</summary>
         public DateTime? DisplayedTimeUtc =>
-            _lastImageTime == default ? (DateTime?)null
-            : _lastImageTime.Kind == DateTimeKind.Local ? _lastImageTime.ToUniversalTime()
-            : DateTime.SpecifyKind(_lastImageTime, DateTimeKind.Utc);
+            _lastImageTime == default ? (DateTime?)null : DewarpExporter.ToUtc(_lastImageTime);
+
+        /// <summary>
+        /// The span selected on the timeline of this tile's window (the Smart Client's "time selection", also
+        /// set by its own export mode), in UTC. False when nothing is selected.
+        /// </summary>
+        public bool TryGetTimelineSelection(out DateTime startUtc, out DateTime endUtc)
+        {
+            startUtc = endUtc = default;
+            // The export window polls every second, so a result is logged only when it differs from the last one.
+            // (default, default) stands for "nothing selected".
+            VideoOS.Platform.FQID controller = null;
+            try
+            {
+                // Null addresses the main window's timeline; a floating window has its own playback controller.
+                controller = _addOn.WindowInformation?.PlaybackControllerFQID;
+                var replies = VideoOS.Platform.EnvironmentManager.Instance.SendMessage(
+                    new Message(MessageId.SmartClient.GetTimelineSelectedIntervalRequest), controller);
+                _loggedSelectionError = null;
+                foreach (object reply in replies)
+                {
+                    if (!(reply is VideoOS.Platform.Util.TimeInterval interval) || interval.Duration <= TimeSpan.Zero) continue;
+                    startUtc = DewarpExporter.ToUtc(interval.StartTime);
+                    endUtc = DewarpExporter.ToUtc(interval.EndTime);
+                    if (_loggedSelection != (startUtc, endUtc))
+                    {
+                        _loggedSelection = (startUtc, endUtc);
+                        Log.Info($"Timeline selection {interval.StartTime:o} ({interval.StartTime.Kind}) to {interval.EndTime:o} ({interval.EndTime.Kind}) {SelectionSource(controller)}");
+                    }
+                    return true;
+                }
+                if (_loggedSelection != (default(DateTime), default(DateTime)))
+                {
+                    _loggedSelection = (default, default);
+                    string got = replies.Count == 0 ? "no reply" : string.Join(", ", replies.Select(r => r is VideoOS.Platform.Util.TimeInterval ti ? $"TimeInterval {ti.Duration}" : r?.GetType().Name ?? "null"));
+                    Log.Info($"Timeline selection: none (replies: {got}) {SelectionSource(controller)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message != _loggedSelectionError)
+                {
+                    _loggedSelectionError = ex.Message;
+                    Log.Error($"Timeline selection request failed {SelectionSource(controller)}", ex);
+                }
+            }
+            return false;
+        }
+
+        private string SelectionSource(VideoOS.Platform.FQID controller) =>
+            $"controller={(controller == null ? "main" : controller.ObjectId.ToString())} {Describe()}";
 
         /// <summary>The camera's full frame size, from the last frame shown.</summary>
         public System.Drawing.Size SourceSize => _originalSize;

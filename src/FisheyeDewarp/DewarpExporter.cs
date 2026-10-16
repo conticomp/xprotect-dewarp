@@ -123,7 +123,7 @@ namespace FisheyeDewarp
 
         private static ExportResult Run(ExportRequest r, Action<double> progress, CancellationToken cancel)
         {
-            Log.Info($"Export start {Describe(r)}");
+            Log.Info($"Export start user='{CurrentUser()}' {Describe(r)}");
             if (!CheckPermission(r.Camera))
                 return new ExportResult { Message = "You do not have permission to export video from this camera." };
             var total = Stopwatch.StartNew();
@@ -199,8 +199,9 @@ namespace FisheyeDewarp
                 Audit(AuditExported, r.Camera, PermissionState.Granted, new Dictionary<string, string>
                 {
                     ["camera"] = r.Camera.Name,
-                    ["start"] = r.StartUtc.ToString("o"),
-                    ["end"] = r.EndUtc.ToString("o"),
+                    ["start"] = AuditTime(r.StartUtc),
+                    ["end"] = AuditTime(r.EndUtc),
+                    ["frames"] = frames.ToString(),
                     ["file"] = r.Path,
                 });
                 return new ExportResult { Succeeded = true, Message = $"Exported {frames} frames to {r.Path}" };
@@ -391,23 +392,52 @@ namespace FisheyeDewarp
                     {
                         var messages = new Dictionary<string, LogMessage>
                         {
-                            [AuditExported] = AuditMessage(AuditExported, "Dewarped MP4 export of {camera} from {start} to {end} to {file}"),
-                            [AuditDenied] = AuditMessage(AuditDenied, "Dewarped MP4 export of {camera} denied: no export permission"),
+                            [AuditExported] = AuditMessage(AuditExported, "{user} exported dewarped video of {camera} from {start} to {end} ({frames} frames) on {workstation} to {file}"),
+                            [AuditDenied] = AuditMessage(AuditDenied, "{user} was denied dewarped video export of {camera} on {workstation}: no export permission"),
                         };
 #pragma warning disable CS0618 // the 25.3+ overload with applicationName is not in 25.2
-                        LogClient.Instance.RegisterDictionary(new LogMessageDictionary("en-US", "1.0", AuditApp, AuditComponent, messages, "Camera"));
+                        LogClient.Instance.RegisterDictionary(new LogMessageDictionary("en-US", "1.1", AuditApp, AuditComponent, messages, "Camera"));
 #pragma warning restore CS0618
                         _auditRegistered = true;
                     }
                 }
+                values["user"] = CurrentUser();
+                values["workstation"] = Environment.MachineName;
+                // AuditEntry never throws: Smart Client queues the write and reports Log Server failures only in
+                // its own logs (C:\ProgramData\Milestone\XProtect Smart Client\LegacyLogClientLog.txt, MIPLog.txt).
                 LogClient.Instance.AuditEntry(AuditApp, AuditComponent, messageId, camera, values, permission);
-                Log.Info($"Audit entry written: {messageId}");
+                Log.Info($"Audit entry handed to Smart Client: {messageId} (Log Server delivery is not confirmed here; see LegacyLogClientLog.txt)");
             }
             catch (Exception ex)
             {
-                Log.Error("Audit entry failed", ex);
+                Log.Error("Audit entry could not be handed to Smart Client", ex);
             }
         }
+
+        /// <summary>
+        /// The Smart Client user, written into the audit text itself so the entry names who exported even where
+        /// the log viewer's User column is not shown. "Display Name (DOMAIN\account)" when both are known.
+        /// </summary>
+        private static string CurrentUser()
+        {
+            string windowsUser = Environment.UserDomainName + "\\" + Environment.UserName;
+            try
+            {
+                var login = VideoOS.Platform.Login.LoginSettingsCache.GetLoginSettings(EnvironmentManager.Instance.MasterSite);
+                string account = login?.FullyQualifiedUserName;
+                string display = login?.UserName;
+                if (string.IsNullOrWhiteSpace(account)) account = windowsUser;
+                return string.IsNullOrWhiteSpace(display) || display == account ? account : $"{display} ({account})";
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Could not read the logged-in user", ex);
+                return windowsUser;
+            }
+        }
+
+        /// <summary>Local time with its UTC offset, so the entry reads like the timeline and is still unambiguous.</summary>
+        private static string AuditTime(DateTime utc) => utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz");
 
         private static LogMessage AuditMessage(string id, string text) => new LogMessage
         {
@@ -422,7 +452,7 @@ namespace FisheyeDewarp
 
         private static int BitrateFor(int width, int height) => (int)Math.Min(20_000_000, Math.Max(2_000_000, width * (long)height * 4));
 
-        private static DateTime ToUtc(DateTime t) => t.Kind == DateTimeKind.Local ? t.ToUniversalTime() : DateTime.SpecifyKind(t, DateTimeKind.Utc);
+        internal static DateTime ToUtc(DateTime t) => t.Kind == DateTimeKind.Local ? t.ToUniversalTime() : DateTime.SpecifyKind(t, DateTimeKind.Utc);
 
         private static string Per(Stopwatch sw, int frames) => frames == 0 ? "-" : (sw.Elapsed.TotalMilliseconds / frames).ToString("F1");
 
