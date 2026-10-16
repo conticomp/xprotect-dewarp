@@ -19,9 +19,10 @@ namespace FisheyeDewarp
     {
         private static readonly string DisableFlag = Path.Combine(Log.Folder, "no-playback-decode");
         private static readonly TimeSpan StatsInterval = TimeSpan.FromMinutes(1);
-        // Ahead by up to this much, step frame by frame: a seek decodes from the previous key frame, about 1 s.
-        private static readonly TimeSpan MaxStep = TimeSpan.FromSeconds(3);
-        // A fetch running longer than this is stuck (seeks take up to about 3 s).
+        // Ahead by up to this much, step frame by frame: a seek decodes from the previous key frame (up to about
+        // 2 s of frames) after a round trip to the recording server, so stepping further costs more than it saves.
+        private static readonly TimeSpan MaxStep = TimeSpan.FromSeconds(2);
+        // One call into the source running longer than this is stuck (seeks take up to about 3 s).
         private static readonly TimeSpan StallLimit = TimeSpan.FromSeconds(10);
         // After a crop change with no new request, wait this long for one before fetching the same frame again
         // at the new crop: while playing, the next request comes within a frame and a re-fetch would be a seek.
@@ -46,7 +47,7 @@ namespace FisheyeDewarp
         private bool _cropChanged = true;
         private volatile bool _disposed;
         private volatile bool _failed;
-        private long _fetchStarted;   // Stopwatch timestamp while a fetch runs, else 0
+        private long _callStarted;   // Stopwatch timestamp while a call into the source runs, else 0
 
         // Worker-thread state.
         private BitmapVideoSource _source;
@@ -74,7 +75,7 @@ namespace FisheyeDewarp
             get
             {
                 if (_failed) return true;
-                long started = Interlocked.Read(ref _fetchStarted);
+                long started = Interlocked.Read(ref _callStarted);
                 return started != 0 && Stopwatch.GetTimestamp() - started > StallLimit.TotalSeconds * Stopwatch.Frequency;
             }
         }
@@ -121,15 +122,21 @@ namespace FisheyeDewarp
         {
             try
             {
+                Busy();
                 _source = new BitmapVideoSource(_camera);
                 _source.Init(_fullSize.Width, _fullSize.Height, BitmapFormat.YCbCr420_Planar);
+                Idle();
                 while (!_disposed)
                 {
                     _wake.WaitOne();
                     if (_disposed) break;
                     bool cropOnly;
                     lock (_gate) cropOnly = !_hasRequest && _cropChanged;
-                    if (cropOnly && _wake.WaitOne(RefetchDelayMs)) _wake.Set();   // something else arrived; go round again
+                    if (cropOnly && _wake.WaitOne(RefetchDelayMs))
+                    {
+                        _wake.Set();   // something else arrived; go round again
+                        continue;
+                    }
                     if (_disposed) break;
 
                     DateTime target;
@@ -145,12 +152,14 @@ namespace FisheyeDewarp
                         cropChanged = _cropChanged;
                         _cropChanged = false;
                     }
-                    if (cropChanged) ApplyCrop(crop);
-                    // Paused, Smart Client repeats the time on screen: the tile already has that frame.
-                    if (_hasDelivered && target == _deliveredTime && _appliedCrop == _deliveredCrop) continue;
-                    Interlocked.Exchange(ref _fetchStarted, Stopwatch.GetTimestamp());
-                    try { Fetch(target); }
-                    finally { Interlocked.Exchange(ref _fetchStarted, 0); }
+                    try
+                    {
+                        if (cropChanged) ApplyCrop(crop);
+                        // Paused, Smart Client repeats the time on screen: the tile already has that frame.
+                        if (_hasDelivered && target == _deliveredTime && _appliedCrop == _deliveredCrop) continue;
+                        Fetch(target);
+                    }
+                    finally { Idle(); }
                 }
             }
             catch (Exception ex)
@@ -164,8 +173,18 @@ namespace FisheyeDewarp
             }
         }
 
+        private void Busy() => Interlocked.Exchange(ref _callStarted, Stopwatch.GetTimestamp());
+        private void Idle() => Interlocked.Exchange(ref _callStarted, 0);
+
+        /// <summary>A newer request this step towards <paramref name="at"/> cannot reach by stepping.</summary>
+        private bool Overtaken(DateTime at)
+        {
+            lock (_gate) return _hasRequest && (_requested < at || _requested - at > MaxStep);
+        }
+
         private void ApplyCrop(System.Windows.Rect crop)
         {
+            Busy();
             _source.SuspendSettingsUpdate();
             _source.SetCropRectangle(crop.X, crop.Y, crop.Width, crop.Height);
             _source.Width = Math.Max(16, (int)Math.Ceiling(crop.Width * _fullSize.Width));
@@ -183,16 +202,20 @@ namespace FisheyeDewarp
             if (sequential)
             {
                 // Playing forward: step to the frame Smart Client shows, decoding any skipped frames on the way.
+                Busy();
                 got = _source.GetNext();
                 while (got is BitmapData step && DewarpExporter.ToUtc(step.DateTime) < target && step.IsNextAvailable)
                 {
+                    _lastTime = DewarpExporter.ToUtc(step.DateTime);
                     step.Dispose();
-                    if (_disposed) return;
+                    if (_disposed || Overtaken(_lastTime)) return;   // the source stays on _lastTime
+                    Busy();
                     got = _source.GetNext();
                 }
             }
             else
             {
+                Busy();
                 got = _source.GetAtOrBefore(target);
             }
             long ticks = Stopwatch.GetTimestamp() - start;
@@ -216,7 +239,8 @@ namespace FisheyeDewarp
                     _decodeStatus = $"{frame.HardwareDecodingStatus}";
                 }
                 // A frame decoded before a crop change has the old size; its crop is unknown, so skip it.
-                if (Math.Abs(frame.GetPlaneWidth(0) / _appliedCrop.Width - _fullSize.Width) > 4 || _disposed) return;
+                double fullWidth = frame.GetPlaneWidth(0) / _appliedCrop.Width;
+                if (fullWidth < _fullSize.Width * 0.98 || fullWidth > _fullSize.Width * 1.02 || _disposed) return;
                 // After a jump on the timeline, a frame for the time before it would only be dropped by the tile.
                 lock (_gate)
                     if (_hasRequest && (_requested - _lastTime).Duration() > MaxLag) return;

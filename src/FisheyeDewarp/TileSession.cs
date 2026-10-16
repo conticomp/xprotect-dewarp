@@ -67,6 +67,7 @@ namespace FisheyeDewarp
         // In Playback, frames come from the tile's own reader of the recording instead.
         private PlaybackDecoder _playback;
         private bool _playbackRefused;
+        private DateTime _playbackFrameTime;   // recording time of _frame when it came from the reader
         private bool _stillInLive;   // the mode _frame came from
         private DateTime _lastLiveFrameUtc;
         // After this long without a decoded frame, the tile goes back to grabbing Smart Client's frames.
@@ -747,6 +748,7 @@ namespace FisheyeDewarp
                 return;
             }
             _frame = frame;
+            _playbackFrameTime = time;
             _frameStale = false;
             RenderStill();
         }
@@ -766,7 +768,7 @@ namespace FisheyeDewarp
         private bool LiveFeeding => _live != null && DateTime.UtcNow - _lastLiveFrameUtc < LiveStall;
 
         /// <summary>The tile's own decode supplies the frames, so Smart Client's are not grabbed.</summary>
-        private bool DecoderFeeding => LiveFeeding || _playback != null;
+        private bool DecoderFeeding => LiveFeeding || (_playback != null && !_playback.GaveUp);
 
         private static readonly Rect WholeImage = new Rect(0, 0, 1, 1);
 
@@ -852,6 +854,9 @@ namespace FisheyeDewarp
 
         private void ViewChanged()
         {
+            // As in OnFrame, so a decoder that gave up while paused is swapped for grabbing on the next pan.
+            UpdateLiveDecoder();
+            UpdatePlaybackDecoder();
             UpdateGeometry();
             RenderStill();
         }
@@ -865,6 +870,12 @@ namespace FisheyeDewarp
             if (resized) UpdateGeometry();
             if (_playback != null && DisplayedTimeUtc is DateTime shown)
             {
+                if (_frame != null && (shown - _playbackFrameTime).Duration() > PlaybackDecoder.MaxLag)
+                {
+                    // A jump on the timeline: the sharp view shows the old moment until the reader catches up.
+                    _frame = null;
+                    if (_still != null) _still.Visibility = Visibility.Collapsed;
+                }
                 _playback.Request(shown);
                 if (resized) RenderStill();
                 return;
