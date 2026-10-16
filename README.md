@@ -228,4 +228,10 @@ comes from the tag. The MSI uses the tag without its suffix (`v0.2.0-beta.1` →
 
 ## License
 
-[MIT](LICENSE). Provided as is, without warranty of any kind.
+[Apache License 2.0](LICENSE). Provided as is, without warranty of any kind.
+
+If you redistribute this plugin or a modified version of it, keep the [NOTICE](NOTICE) file with it, as section 4 of the license
+requires. The installer and `install.ps1` put `LICENSE.txt` and `NOTICE.txt` in the plugin folder for that reason.
+
+Not affiliated with or endorsed by Milestone Systems or Axis Communications. XProtect is a trademark of Milestone Systems A/S;
+Axis is a trademark of Axis AB.

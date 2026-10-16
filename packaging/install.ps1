@@ -6,6 +6,8 @@ param([switch]$Uninstall)
 $ErrorActionPreference = 'Stop'
 $target = Join-Path $env:ProgramFiles 'Milestone\MIPPlugins\FisheyeDewarp'
 $files = 'FisheyeDewarp.dll', 'FisheyeDewarp.pdb', 'plugin.def'
+# Apache 2.0 requires the license and NOTICE to travel with every copy; installed under the same names as the MSI uses.
+$notices = @{ 'LICENSE' = 'LICENSE.txt'; 'NOTICE' = 'NOTICE.txt' }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -21,11 +23,12 @@ if ($Uninstall) {
     return
 }
 
-foreach ($f in $files) {
+foreach ($f in $files + $notices.Keys) {
     if (-not (Test-Path (Join-Path $PSScriptRoot $f))) { throw "Missing $f next to install.ps1. Extract the whole zip first." }
 }
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 foreach ($f in $files) { Copy-Item (Join-Path $PSScriptRoot $f) -Destination $target -Force }
+foreach ($f in $notices.Keys) { Copy-Item (Join-Path $PSScriptRoot $f) -Destination (Join-Path $target $notices[$f]) -Force }
 Get-ChildItem $target | Unblock-File
 
 Write-Host "Fisheye Dewarp installed to $target"
