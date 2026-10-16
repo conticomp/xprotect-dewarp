@@ -63,6 +63,7 @@ namespace FisheyeDewarp
         // In Live, frames come from the tile's own decoded stream instead of Smart Client's slow grab.
         private LiveDecoder _live;
         private bool _liveRefused;
+        private bool _stillInLive;   // the mode _frame came from
         private DateTime _lastLiveFrameUtc;
         // After this long without a decoded frame, the tile goes back to grabbing Smart Client's frames.
         private static readonly TimeSpan LiveStall = TimeSpan.FromSeconds(2);
@@ -160,6 +161,7 @@ namespace FisheyeDewarp
             _stillLogs = 0;
             _frame = null;
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
+            _stillInLive = _addOn.InLiveMode;
             UpdateLiveDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
@@ -480,7 +482,7 @@ namespace FisheyeDewarp
                     if (_stillLogs++ < 8)
                         Log.Info($"Sharp render {job}, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
                     if (_still == null) return;
-                    if (paint == _lastPaint)
+                    if (paint == _lastPaint && _frame != null)   // null: the mode changed while rendering
                     {
                         _still.Source = t.Result;
                         _still.Visibility = Visibility.Visible;
@@ -514,6 +516,7 @@ namespace FisheyeDewarp
             _frameStale = false;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool onUi = _grabOnUiThread;
+            bool grabInLive = _stillInLive;
 
             Func<SourceFrame> grab = () =>
             {
@@ -559,6 +562,7 @@ namespace FisheyeDewarp
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
                 if (LiveFeeding) return;   // a decoded frame newer than this grab is already showing
+                if (grabInLive != _stillInLive) return;   // grabbed before a Live/Playback switch: the other mode's picture
                 _frame = frame;
                 RenderStill();
             };
@@ -630,6 +634,15 @@ namespace FisheyeDewarp
         private void UpdateLiveDecoder()
         {
             bool want = Enabled && _addOn.InLiveMode;
+            if (Enabled && _addOn.InLiveMode != _stillInLive)
+            {
+                // The still shows the other mode's picture (e.g. the last playback frame over live video); hide it
+                // until a frame from this mode arrives.
+                _stillInLive = _addOn.InLiveMode;
+                _frame = null;
+                _frameStale = true;
+                if (_still != null) _still.Visibility = Visibility.Collapsed;
+            }
             if (_live != null && _live.GaveUp)
             {
                 _live.Dispose();
