@@ -52,6 +52,7 @@ namespace FisheyeDewarp
         // Latest frame the tile showed, for the export's default times and source size.
         private DateTime _lastImageTime;
         private System.Drawing.Size _originalSize;
+        private string _lastSelectionLog;
 
         public TileSession(ImageViewerAddOn addOn)
         {
@@ -227,19 +228,33 @@ namespace FisheyeDewarp
                 VideoOS.Platform.FQID controller = _addOn.WindowInformation?.PlaybackControllerFQID;
                 var replies = VideoOS.Platform.EnvironmentManager.Instance.SendMessage(
                     new Message(MessageId.SmartClient.GetTimelineSelectedIntervalRequest), controller);
+                var replyTypes = new List<string>();
                 foreach (object reply in replies)
                 {
+                    replyTypes.Add(reply == null ? "null" : reply is VideoOS.Platform.Util.TimeInterval ti ? $"TimeInterval {ti.Duration}" : reply.GetType().Name);
                     if (!(reply is VideoOS.Platform.Util.TimeInterval interval) || interval.Duration <= TimeSpan.Zero) continue;
                     startUtc = ToUtc(interval.StartTime);
                     endUtc = ToUtc(interval.EndTime);
+                    LogSelectionChange($"Timeline selection {interval.StartTime:o} ({interval.StartTime.Kind}) to {interval.EndTime:o} ({interval.EndTime.Kind}), "
+                        + $"as UTC {startUtc:o} to {endUtc:o}, controller={(controller == null ? "main" : controller.ObjectId.ToString())} {Describe()}");
                     return true;
                 }
+                LogSelectionChange($"Timeline selection: none (replies: {(replyTypes.Count == 0 ? "no reply" : string.Join(", ", replyTypes))}), "
+                    + $"controller={(controller == null ? "main" : controller.ObjectId.ToString())} {Describe()}");
             }
             catch (Exception ex)
             {
                 Log.Error($"Timeline selection request failed for {Describe()}", ex);
             }
             return false;
+        }
+
+        // The export window polls the selection every second, so only a change is logged.
+        private void LogSelectionChange(string line)
+        {
+            if (line == _lastSelectionLog) return;
+            _lastSelectionLog = line;
+            Log.Info(line);
         }
 
         private static DateTime ToUtc(DateTime t) =>
