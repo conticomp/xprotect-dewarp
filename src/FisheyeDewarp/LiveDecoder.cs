@@ -17,44 +17,50 @@ namespace FisheyeDewarp
     /// </summary>
     internal sealed class LiveDecoder : IDisposable
     {
-        private static readonly string DisableFlag = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "no-live-decode");
-
-
+        private static readonly string DisableFlag = Path.Combine(Log.Folder, "no-live-decode");
         private static readonly TimeSpan StatsInterval = TimeSpan.FromMinutes(1);
         private static int _running;
 
         private readonly BitmapLiveSource _source;
         private readonly Action<SourceFrame> _onFrame;
         private readonly string _camera;
+        private System.Drawing.Size _fullSize;
 
-        // Frames are copied into a few reused buffers: a 2992x2992 frame is 36 MB, and allocating one per frame
-        // would keep the garbage collector busy. One is being filled, one is the latest frame, one may be rendering.
-        private readonly int[][] _pool = new int[4][];
-        private readonly byte[][][] _yuvPool = new byte[4][][];
+        // Frames are copied into a few reused buffers: a full 2992x2992 frame is 13 MB, and allocating one per frame
+        // would keep the garbage collector busy. One is being filled, one is the latest frame, one may be rendering,
+        // and one may still be queued for the UI thread.
+        private readonly byte[][][] _pool = new byte[4][][];
         private int _next;
-        private int _formatLogs;
-        private int _unknownFormatLogs;
+        private bool _formatLogged;
+
+        // Frames coarser than the camera's pixel density would make the sharp view softer than grabbing does.
+        private const int CoarseLimit = 10;
+        private int _coarseRun;
 
         private readonly object _statsGate = new object();
         private int _frames;
         private long _copyTicks;
         private string _decodeStatus;
-        private string _lastSize;
+        private int _lastWidth, _lastHeight;
+        private double _lastCropArea;
         private Timer _statsTimer;
         private bool _disposed;
         private bool _counted;
 
         public static bool Allowed => !File.Exists(DisableFlag);
 
-        public static int Running => _running;
+        /// <summary>
+        /// True once the decode kept sending frames coarser than the camera: it delivers no more frames, and the
+        /// tile should stop it and grab frames from Smart Client instead.
+        /// </summary>
+        public bool GaveUp { get; private set; }
 
         private LiveDecoder(Item camera, Guid streamId, Action<SourceFrame> onFrame)
         {
             _camera = camera.Name;
             _onFrame = onFrame;
-            // YCbCr 4:2:0, so only the pixels the view samples get converted: about a third less CPU than MIP
-            // converting every frame to BGR32. BGR frames are still accepted, should MIP ever send them.
+            // YCbCr 4:2:0, so only the pixels the view samples get converted: about a quarter less CPU than MIP
+            // converting every frame to BGR32.
             _source = new BitmapLiveSource(camera, BitmapFormat.YCbCr420_Planar);
             if (streamId != Guid.Empty) _source.StreamId = streamId;
             _source.LiveContentEvent += OnContent;
@@ -68,6 +74,7 @@ namespace FisheyeDewarp
             try
             {
                 decoder = new LiveDecoder(camera, streamId, onFrame);
+                decoder._fullSize = size;
                 decoder._source.Init();
                 // The size must be set explicitly: left at 0, frames arrive scaled to 640x480.
                 decoder._source.Width = size.Width;
@@ -106,18 +113,29 @@ namespace FisheyeDewarp
             }
             try
             {
-                if (_disposed) return;
+                if (_disposed || GaveUp) return;
                 long start = Stopwatch.GetTimestamp();
                 SourceFrame frame = Copy(content);
                 long ticks = Stopwatch.GetTimestamp() - start;
+                if (frame == null) return;
                 lock (_statsGate)
                 {
-                    if (frame != null) _lastSize = $"{frame.Width}x{frame.Height} ({frame.Crop.Width * frame.Crop.Height * 100:F0}% of the image)";
+                    _lastWidth = frame.Width;
+                    _lastHeight = frame.Height;
+                    _lastCropArea = frame.Crop.Width * frame.Crop.Height;
                     _frames++;
                     _copyTicks += ticks;
                     _decodeStatus = content.HardwareDecodingStatus;
                 }
-                if (frame != null) _onFrame(frame);
+                if (frame.FullWidth < _fullSize.Width * 0.98 || frame.FullHeight < _fullSize.Height * 0.98)
+                {
+                    if (++_coarseRun < CoarseLimit) return;
+                    GaveUp = true;   // the tile stops the decode on its own thread
+                    Log.Info($"Live decode camera='{_camera}' keeps sending {frame.Width}x{frame.Height} for crop {frame.Crop}, coarser than the camera's {_fullSize.Width}x{_fullSize.Height}; giving up");
+                    return;
+                }
+                _coarseRun = 0;
+                _onFrame(frame);
             }
             catch (Exception ex)
             {
@@ -131,38 +149,18 @@ namespace FisheyeDewarp
 
         private SourceFrame Copy(LiveSourceBitmapContent content)
         {
-            if (_formatLogs++ < 1)
-                Log.Info($"Live decode format camera='{_camera}': {content.Format}, planes " +
-                    $"{content.GetPlaneWidth(0)}x{content.GetPlaneHeight(0)}/{content.GetPlaneStride(0)}" +
-                    (content.Format == BitmapFormat.YCbCr420_Planar
-                        ? $", {content.GetPlaneWidth(1)}x{content.GetPlaneHeight(1)}/{content.GetPlaneStride(1)}, {content.GetPlaneWidth(2)}x{content.GetPlaneHeight(2)}/{content.GetPlaneStride(2)}"
-                        : ""));
+            if (content.Format != BitmapFormat.YCbCr420_Planar)
+            {
+                // Without frames the tile keeps grabbing them from Smart Client.
+                if (!_formatLogged) Log.Info($"Live decode camera='{_camera}' sent {content.Format}, which the sharp view cannot use; grabbing frames instead");
+                _formatLogged = true;
+                return null;
+            }
             var crop = content.CroppingDefined
                 ? new System.Windows.Rect(content.CropX, content.CropY, content.CropWidth, content.CropHeight)
                 : new System.Windows.Rect(0, 0, 1, 1);
-            if (content.Format == BitmapFormat.YCbCr420_Planar) return CopyYuv(content, crop);
-            if (content.Format != BitmapFormat.BGR32 && content.Format != BitmapFormat.BGRA)
-            {
-                if (_unknownFormatLogs++ < 1) Log.Info($"Live decode camera='{_camera}' sent {content.Format}, which the sharp view cannot use; grabbing frames instead");
-                return null;
-            }
-            int width = content.GetPlaneWidth(0), height = content.GetPlaneHeight(0), stride = content.GetPlaneStride(0);
-            int[] pixels = _pool[_next];
-            if (pixels == null || pixels.Length != width * height) _pool[_next] = pixels = new int[width * height];
+            byte[][] planes = _pool[_next] ?? (_pool[_next] = new byte[3][]);
             _next = (_next + 1) % _pool.Length;
-            IntPtr scan0 = content.GetPlanePointer(0);
-            if (stride == width * 4)
-                Marshal.Copy(scan0, pixels, 0, pixels.Length);
-            else
-                for (int y = 0; y < height; y++)
-                    Marshal.Copy(scan0 + y * stride, pixels, y * width, width);
-            return new SourceFrame(pixels, width, height, crop);
-        }
-
-        private SourceFrame CopyYuv(LiveSourceBitmapContent content, System.Windows.Rect crop)
-        {
-            byte[][] planes = _yuvPool[_next] ?? (_yuvPool[_next] = new byte[3][]);
-            _next = (_next + 1) % _yuvPool.Length;
             for (int p = 0; p < 3; p++)
             {
                 int width = content.GetPlaneWidth(p), height = content.GetPlaneHeight(p), stride = content.GetPlaneStride(p);
@@ -182,14 +180,14 @@ namespace FisheyeDewarp
         /// Decode only this part of the image (fractions 0..1), still at the camera's pixel density. Converting and
         /// copying a full 2992x2992 frame is most of the sharp view's CPU cost, and the view only needs part of it.
         /// </summary>
-        public void SetCrop(System.Windows.Rect crop, System.Drawing.Size full)
+        public void SetCrop(System.Windows.Rect crop)
         {
             try
             {
                 _source.SuspendSettingsUpdate();
                 _source.SetCropRectangle(crop.X, crop.Y, crop.Width, crop.Height);
-                _source.Width = Math.Max(16, (int)Math.Ceiling(crop.Width * full.Width));
-                _source.Height = Math.Max(16, (int)Math.Ceiling(crop.Height * full.Height));
+                _source.Width = Math.Max(16, (int)Math.Ceiling(crop.Width * _fullSize.Width));
+                _source.Height = Math.Max(16, (int)Math.Ceiling(crop.Height * _fullSize.Height));
                 _source.SetWidthHeight();
                 _source.ResumeSettingsUpdate();
             }
@@ -212,7 +210,7 @@ namespace FisheyeDewarp
             string status, size;
             lock (_statsGate)
             {
-                size = _lastSize;
+                size = $"{_lastWidth}x{_lastHeight} ({_lastCropArea * 100:F0}% of the image)";
                 frames = _frames;
                 copyMs = frames == 0 ? 0 : _copyTicks * 1000.0 / Stopwatch.Frequency / frames;
                 status = _decodeStatus;
