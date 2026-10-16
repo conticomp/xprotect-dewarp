@@ -42,19 +42,35 @@ namespace FisheyeDewarp
             }
         }
 
+        // A 610x610 still is a few milliseconds of work; spreading it over every core costs more in scheduling
+        // than it saves, and Smart Client needs the rest of the machine.
+        private static readonly ParallelOptions Threads = new ParallelOptions { MaxDegreeOfParallelism = 4 };
+
         public static BitmapSource Render(SourceFrame src, double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
         {
-            var output = new int[width * height];
-            double tanHalfLens = Math.Tan(lensHalfFov / 2);
+            RenderMap map = null;
+            return Render(src, m, tanX, tanY, lensHalfFov, width, height, ref map);
+        }
 
-            Parallel.For(0, height, y =>
+        /// <summary>
+        /// Renders through <paramref name="map"/>, the source position of each output pixel. It is rebuilt only
+        /// when the view or size changed, so a steady Live view costs one bilinear sample per pixel and no trig.
+        /// </summary>
+        public static BitmapSource Render(SourceFrame src, double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height, ref RenderMap map)
+        {
+            if (map == null || !map.Matches(m, tanX, tanY, lensHalfFov, width, height))
+                map = RenderMap.Build(m, tanX, tanY, lensHalfFov, width, height);
+            float[] xy = map.Positions;
+            var output = new int[width * height];
+
+            Parallel.For(0, height, Threads, y =>
             {
                 int row = y * width;
                 for (int x = 0; x < width; x++)
                 {
-                    output[row + x] = MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy)
-                        ? src.SampleAt(ix, iy)
-                        : unchecked((int)0xFF000000);
+                    int i = row + x;
+                    float ix = xy[2 * i];
+                    output[i] = float.IsNaN(ix) ? unchecked((int)0xFF000000) : src.SampleAt(ix, xy[2 * i + 1]);
                 }
             });
 
@@ -92,6 +108,66 @@ namespace FisheyeDewarp
         }
     }
 
+    /// <summary>Where each output pixel of one view samples the fisheye image (fractions 0..1; NaN outside the lens).</summary>
+    internal sealed class RenderMap
+    {
+        private readonly double[] _rotation;
+        private readonly double _tanX, _tanY, _lensHalfFov;
+        private readonly int _width, _height;
+
+        private RenderMap(double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height, float[] positions)
+        {
+            _rotation = Flatten(m);
+            _tanX = tanX;
+            _tanY = tanY;
+            _lensHalfFov = lensHalfFov;
+            _width = width;
+            _height = height;
+            Positions = positions;
+        }
+
+        public float[] Positions { get; }
+
+        public static RenderMap Build(double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
+        {
+            double tanHalfLens = Math.Tan(lensHalfFov / 2);
+            var xy = new float[2 * width * height];
+            Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = 4 }, y =>
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int i = 2 * (y * width + x);
+                    if (SnapshotRenderer.MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy))
+                    {
+                        xy[i] = (float)ix;
+                        xy[i + 1] = (float)iy;
+                    }
+                    else
+                        xy[i] = xy[i + 1] = float.NaN;
+                }
+            });
+            return new RenderMap(m, tanX, tanY, lensHalfFov, width, height, xy);
+        }
+
+        public bool Matches(double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
+        {
+            if (width != _width || height != _height || tanX != _tanX || tanY != _tanY || lensHalfFov != _lensHalfFov) return false;
+            double[] r = Flatten(m);
+            for (int i = 0; i < r.Length; i++)
+                if (r[i] != _rotation[i]) return false;
+            return true;
+        }
+
+        private static double[] Flatten(double[,] m)
+        {
+            var r = new double[9];
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    r[3 * i + j] = m[i, j];
+            return r;
+        }
+    }
+
     /// <summary>A CPU dewarp ready to run on a worker thread.</summary>
     internal sealed class RenderJob
     {
@@ -99,9 +175,11 @@ namespace FisheyeDewarp
         private readonly double[,] _rotation;
         private readonly double _tanX, _tanY, _lensHalfFov;
         private long _renderMs;
+        private bool _mapReused;
 
-        public RenderJob(SourceFrame source, double[,] rotation, double tanX, double tanY, double lensHalfFov, int width, int height)
+        public RenderJob(SourceFrame source, double[,] rotation, double tanX, double tanY, double lensHalfFov, int width, int height, RenderMap map = null)
         {
+            Map = map;
             _source = source;
             _rotation = rotation;
             _tanX = tanX;
@@ -115,21 +193,29 @@ namespace FisheyeDewarp
 
         public int Height { get; }
 
+        /// <summary>The pixel map used, which the next render of the same view can reuse.</summary>
+        public RenderMap Map { get; private set; }
+
         public BitmapSource Render()
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            BitmapSource result = SnapshotRenderer.Render(_source, _rotation, _tanX, _tanY, _lensHalfFov, Width, Height);
+            RenderMap map = Map;
+            BitmapSource result = SnapshotRenderer.Render(_source, _rotation, _tanX, _tanY, _lensHalfFov, Width, Height, ref map);
+            _mapReused = map == Map;
+            Map = map;
             _renderMs = sw.ElapsedMilliseconds;
             return result;
         }
 
         public override string ToString() =>
-            $"{Width}x{Height} from {_source.Width}x{_source.Height} (render {_renderMs} ms)";
+            $"{Width}x{Height} from {_source.Width}x{_source.Height}{(_source.IsYuv ? " YUV" : "")} (render {_renderMs} ms, map {(_mapReused ? "reused" : "built")})";
     }
 
     internal sealed class SourceFrame
     {
         private readonly int[] _pixels;
+        private readonly byte[] _luma, _cb, _cr;   // YCbCr 4:2:0 instead of _pixels, straight from the decoder
+        private readonly int _chromaWidth, _chromaHeight;
 
         public SourceFrame(int[] pixels, int width, int height) : this(pixels, width, height, new System.Windows.Rect(0, 0, 1, 1))
         {
@@ -144,9 +230,24 @@ namespace FisheyeDewarp
             Crop = crop;
         }
 
+        /// <summary>A YCbCr 4:2:0 frame; chroma planes are chromaWidth x chromaHeight.</summary>
+        public SourceFrame(byte[] luma, byte[] cb, byte[] cr, int width, int height, int chromaWidth, int chromaHeight, System.Windows.Rect crop)
+        {
+            _luma = luma;
+            _cb = cb;
+            _cr = cr;
+            _chromaWidth = chromaWidth;
+            _chromaHeight = chromaHeight;
+            Width = width;
+            Height = height;
+            Crop = crop;
+        }
+
         public int Width { get; }
 
         public int Height { get; }
+
+        public bool IsYuv => _luma != null;
 
         public System.Windows.Rect Crop { get; }
 
@@ -174,6 +275,7 @@ namespace FisheyeDewarp
         {
             x = Math.Max(0, Math.Min(Width - 1.001, x));
             y = Math.Max(0, Math.Min(Height - 1.001, y));
+            if (_luma != null) return SampleYuv(x, y);
             int x0 = (int)x, y0 = (int)y;
             double fx = x - x0, fy = y - y0;
             int i = y0 * Width + x0;
@@ -188,5 +290,30 @@ namespace FisheyeDewarp
             }
             return result;
         }
+
+        /// <summary>Bilinear luma and chroma, converted with BT.601 limited range (what H.264 cameras send).</summary>
+        private int SampleYuv(double x, double y)
+        {
+            double luma = Bilinear(_luma, Width, x, y);
+            // Chroma sample k sits at luma position 2k + 0.5.
+            double cx = Math.Max(0, Math.Min(_chromaWidth - 1.001, (x + 0.5) * _chromaWidth / Width - 0.5));
+            double cy = Math.Max(0, Math.Min(_chromaHeight - 1.001, (y + 0.5) * _chromaHeight / Height - 0.5));
+            double cb = Bilinear(_cb, _chromaWidth, cx, cy) - 128, cr = Bilinear(_cr, _chromaWidth, cx, cy) - 128;
+            double c = (luma - 16) * 1.164;
+            int r = Clamp(c + 1.596 * cr), g = Clamp(c - 0.392 * cb - 0.813 * cr), b = Clamp(c + 2.017 * cb);
+            return unchecked((int)0xFF000000) | (r << 16) | (g << 8) | b;
+        }
+
+        private static double Bilinear(byte[] plane, int stride, double x, double y)
+        {
+            int x0 = (int)x, y0 = (int)y;
+            double fx = x - x0, fy = y - y0;
+            int i = y0 * stride + x0;
+            double top = plane[i] * (1 - fx) + plane[i + 1] * fx;
+            double bottom = plane[i + stride] * (1 - fx) + plane[i + stride + 1] * fx;
+            return top * (1 - fy) + bottom * fy;
+        }
+
+        private static int Clamp(double v) => v <= 0 ? 0 : v >= 255 ? 255 : (int)(v + 0.5);
     }
 }

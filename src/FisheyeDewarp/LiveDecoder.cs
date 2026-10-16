@@ -19,6 +19,11 @@ namespace FisheyeDewarp
         private static readonly string DisableFlag = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "no-live-decode");
 
+        // SPIKE: decode to YCbCr 4:2:0 and convert only the pixels the view samples, instead of MIP converting
+        // the whole frame to BGR32.
+        private static readonly string YuvFlag = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "yuv-decode");
+
         private static int _running;
 
         private readonly BitmapLiveSource _source;
@@ -28,7 +33,10 @@ namespace FisheyeDewarp
         // Frames are copied into a few reused buffers: a 2992x2992 frame is 36 MB, and allocating one per frame
         // would keep the garbage collector busy. One is being filled, one is the latest frame, one may be rendering.
         private readonly int[][] _pool = new int[4][];
+        private readonly byte[][][] _yuvPool = new byte[4][][];
         private int _next;
+        private readonly bool _yuv;
+        private int _formatLogs;
 
         private readonly object _statsGate = new object();
         private int _frames;
@@ -47,7 +55,8 @@ namespace FisheyeDewarp
         {
             _camera = camera.Name;
             _onFrame = onFrame;
-            _source = new BitmapLiveSource(camera, BitmapFormat.BGR32);
+            _yuv = File.Exists(YuvFlag);
+            _source = new BitmapLiveSource(camera, _yuv ? BitmapFormat.YCbCr420_Planar : BitmapFormat.BGR32);
             if (streamId != Guid.Empty) _source.StreamId = streamId;
             _source.LiveContentEvent += OnContent;
             _source.LiveStatusEvent += OnStatus;
@@ -70,7 +79,7 @@ namespace FisheyeDewarp
                 decoder._statsTimer = new Timer(_ => decoder.LogStats(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
                 Interlocked.Increment(ref _running);
                 decoder._counted = true;
-                Log.Info($"Live decode START camera='{camera.Name}' stream={streamId} size={size.Width}x{size.Height} (running: {_running})");
+                Log.Info($"Live decode START camera='{camera.Name}' stream={streamId} size={size.Width}x{size.Height} format={(decoder._yuv ? "YCbCr420" : "BGR32")} (running: {_running})");
                 return decoder;
             }
             catch (Exception ex)
@@ -123,6 +132,16 @@ namespace FisheyeDewarp
 
         private SourceFrame Copy(LiveSourceBitmapContent content)
         {
+            if (_formatLogs++ < 1)
+                Log.Info($"Live decode format camera='{_camera}': {content.Format}, planes " +
+                    $"{content.GetPlaneWidth(0)}x{content.GetPlaneHeight(0)}/{content.GetPlaneStride(0)}" +
+                    (content.Format == BitmapFormat.YCbCr420_Planar
+                        ? $", {content.GetPlaneWidth(1)}x{content.GetPlaneHeight(1)}/{content.GetPlaneStride(1)}, {content.GetPlaneWidth(2)}x{content.GetPlaneHeight(2)}/{content.GetPlaneStride(2)}"
+                        : ""));
+            var crop = content.CroppingDefined
+                ? new System.Windows.Rect(content.CropX, content.CropY, content.CropWidth, content.CropHeight)
+                : new System.Windows.Rect(0, 0, 1, 1);
+            if (content.Format == BitmapFormat.YCbCr420_Planar) return CopyYuv(content, crop);
             if (content.Format != BitmapFormat.BGR32 && content.Format != BitmapFormat.BGRA) return null;
             int width = content.GetPlaneWidth(0), height = content.GetPlaneHeight(0), stride = content.GetPlaneStride(0);
             int[] pixels = _pool[_next];
@@ -134,10 +153,26 @@ namespace FisheyeDewarp
             else
                 for (int y = 0; y < height; y++)
                     Marshal.Copy(scan0 + y * stride, pixels, y * width, width);
-            var crop = content.CroppingDefined
-                ? new System.Windows.Rect(content.CropX, content.CropY, content.CropWidth, content.CropHeight)
-                : new System.Windows.Rect(0, 0, 1, 1);
             return new SourceFrame(pixels, width, height, crop);
+        }
+
+        private SourceFrame CopyYuv(LiveSourceBitmapContent content, System.Windows.Rect crop)
+        {
+            byte[][] planes = _yuvPool[_next] ?? (_yuvPool[_next] = new byte[3][]);
+            _next = (_next + 1) % _yuvPool.Length;
+            for (int p = 0; p < 3; p++)
+            {
+                int width = content.GetPlaneWidth(p), height = content.GetPlaneHeight(p), stride = content.GetPlaneStride(p);
+                if (planes[p] == null || planes[p].Length != width * height) planes[p] = new byte[width * height];
+                IntPtr scan0 = content.GetPlanePointer(p);
+                if (stride == width)
+                    Marshal.Copy(scan0, planes[p], 0, width * height);
+                else
+                    for (int y = 0; y < height; y++)
+                        Marshal.Copy(scan0 + y * stride, planes[p], y * width, width);
+            }
+            return new SourceFrame(planes[0], planes[1], planes[2], content.GetPlaneWidth(0), content.GetPlaneHeight(0),
+                content.GetPlaneWidth(1), content.GetPlaneHeight(1), crop);
         }
 
         /// <summary>

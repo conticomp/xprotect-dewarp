@@ -412,7 +412,7 @@ namespace FisheyeDewarp
                 width = (int)Math.Max(1280, Math.Min(3840, pixelsPerRadian * 2 * tanX));
             }
             int height = Math.Max(1, (int)Math.Round(width / aspect));
-            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height);
+            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height, fitToScreen ? _renderMap : null);
         }
 
         /// <summary>
@@ -458,6 +458,7 @@ namespace FisheyeDewarp
                 Task.Run(job.Render).ContinueWith(t =>
                 {
                     _stillBusy = false;
+                    _renderMap = job.Map;
                     if (t.IsFaulted)
                     {
                         Log.Error($"Sharp render failed for {Describe()}", t.Exception);
@@ -673,6 +674,7 @@ namespace FisheyeDewarp
         }
 
         private bool _liveRefused;
+        private RenderMap _renderMap;   // the still's pixel map, reused while the view stays put
         private static readonly TimeSpan MinStillInterval = TimeSpan.FromMilliseconds(33);
         private DateTime _lastStillStart;
         private DispatcherTimer _stillTimer;
