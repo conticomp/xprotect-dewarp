@@ -208,6 +208,7 @@ The plugin writes a log to:
 | The image is soft for a moment | This is expected right after turning Dewarp on or resizing the tile, until the first full-resolution frame arrives. |
 | Export fails with "Media Foundation is not installed" | Windows N: install the Media Feature Pack. Windows Server: `Install-WindowsFeature Server-Media-Foundation`, then restart. |
 | Export says there is no recorded video | Check the time range in Playback; the camera may not have recorded then. |
+| Smart Client shows an `SEHException` in `GetCurrentImage` | Smart Client could not hand over a full-resolution frame, usually because the connection to the VMS dropped. The plugin waits for a new frame and backs off (up to 30 s) before trying again, so the error should not repeat while the connection is down. The tile keeps its shader view meanwhile. |
 | Slow over Remote Desktop | Expected, because RDP uses software rendering. Evaluate at the physical workstation. |
 
 ## Uninstall
