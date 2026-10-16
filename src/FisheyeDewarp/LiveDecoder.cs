@@ -104,7 +104,7 @@ namespace FisheyeDewarp
                 long ticks = Stopwatch.GetTimestamp() - start;
                 lock (_statsGate)
                 {
-                    if (frame != null) _lastSize = $"{frame.Width}x{frame.Height}";
+                    if (frame != null) _lastSize = $"{frame.Width}x{frame.Height} ({frame.Crop.Width * frame.Crop.Height * 100:F0}% of the image)";
                     _frames++;
                     _copyTicks += ticks;
                     _decodeStatus = content.HardwareDecodingStatus;
@@ -134,7 +134,31 @@ namespace FisheyeDewarp
             else
                 for (int y = 0; y < height; y++)
                     Marshal.Copy(scan0 + y * stride, pixels, y * width, width);
-            return new SourceFrame(pixels, width, height);
+            var crop = content.CroppingDefined
+                ? new System.Windows.Rect(content.CropX, content.CropY, content.CropWidth, content.CropHeight)
+                : new System.Windows.Rect(0, 0, 1, 1);
+            return new SourceFrame(pixels, width, height, crop);
+        }
+
+        /// <summary>
+        /// Decode only this part of the image (fractions 0..1), still at the camera's pixel density. Converting and
+        /// copying a full 2992x2992 frame is most of the sharp view's CPU cost, and the view only needs part of it.
+        /// </summary>
+        public void SetCrop(System.Windows.Rect crop, System.Drawing.Size full)
+        {
+            try
+            {
+                _source.SuspendSettingsUpdate();
+                _source.SetCropRectangle(crop.X, crop.Y, crop.Width, crop.Height);
+                _source.Width = Math.Max(16, (int)Math.Ceiling(crop.Width * full.Width));
+                _source.Height = Math.Max(16, (int)Math.Ceiling(crop.Height * full.Height));
+                _source.SetWidthHeight();
+                _source.ResumeSettingsUpdate();
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Live decode crop failed camera='{_camera}'", ex);
+            }
         }
 
         private void OnStatus(object sender, EventArgs e)

@@ -53,7 +53,7 @@ namespace FisheyeDewarp
                 for (int x = 0; x < width; x++)
                 {
                     output[row + x] = MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy)
-                        ? src.Sample(ix * src.Width - 0.5, iy * src.Height - 0.5)
+                        ? src.SampleAt(ix, iy)
                         : unchecked((int)0xFF000000);
                 }
             });
@@ -131,16 +131,43 @@ namespace FisheyeDewarp
     {
         private readonly int[] _pixels;
 
-        public SourceFrame(int[] pixels, int width, int height)
+        public SourceFrame(int[] pixels, int width, int height) : this(pixels, width, height, new System.Windows.Rect(0, 0, 1, 1))
+        {
+        }
+
+        /// <param name="crop">The part of the full fisheye image these pixels cover, as fractions 0..1 of it.</param>
+        public SourceFrame(int[] pixels, int width, int height, System.Windows.Rect crop)
         {
             _pixels = pixels;
             Width = width;
             Height = height;
+            Crop = crop;
         }
 
         public int Width { get; }
 
         public int Height { get; }
+
+        public System.Windows.Rect Crop { get; }
+
+        public bool IsCropped => Crop.Width < 1 || Crop.Height < 1;
+
+        /// <summary>Width the full fisheye image would have at this frame's pixel density.</summary>
+        public double FullWidth => Width / Crop.Width;
+
+        public double FullHeight => Height / Crop.Height;
+
+        /// <summary>
+        /// Bilinear sample at a position given as fractions 0..1 of the full fisheye image. Transparent outside a
+        /// cropped frame, so the shader view underneath shows through until a frame covering that part arrives.
+        /// </summary>
+        public int SampleAt(double ix, double iy)
+        {
+            double x = (ix - Crop.X) / Crop.Width * Width - 0.5;
+            double y = (iy - Crop.Y) / Crop.Height * Height - 0.5;
+            if (IsCropped && (x < -1 || y < -1 || x > Width || y > Height)) return 0;
+            return Sample(x, y);
+        }
 
         /// <summary>Bilinear sample at pixel coordinates, clamped to the frame edges.</summary>
         public int Sample(double x, double y)

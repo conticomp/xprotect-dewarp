@@ -406,7 +406,7 @@ namespace FisheyeDewarp
                 // snapshot neither throws detail away nor pretends to more than the camera captured.
                 double theta = Math.Acos(Math.Max(-1, Math.Min(1, m[2, 2])));
                 double halfCos = Math.Cos(theta / 2);
-                double pixelsPerRadian = source.Width / 2.0 / (2 * Math.Tan(LensHalfFov / 2) * halfCos * halfCos);
+                double pixelsPerRadian = source.FullWidth / 2.0 / (2 * Math.Tan(LensHalfFov / 2) * halfCos * halfCos);
                 width = (int)Math.Max(1280, Math.Min(3840, pixelsPerRadian * 2 * tanX));
             }
             int height = Math.Max(1, (int)Math.Round(width / aspect));
@@ -425,9 +425,28 @@ namespace FisheyeDewarp
                 _stillPending = true;
                 return;
             }
+            // Mouse moves arrive far faster than the eye needs; cap sharp renders at about 30 per second.
+            TimeSpan sinceLast = DateTime.UtcNow - _lastStillStart;
+            if (sinceLast < MinStillInterval)
+            {
+                if (_stillTimer == null)
+                {
+                    _stillTimer = new DispatcherTimer { Interval = MinStillInterval - sinceLast };
+                    _stillTimer.Tick += (sender, e) =>
+                    {
+                        _stillTimer.Stop();
+                        _stillTimer = null;
+                        RenderStill();
+                    };
+                    _stillTimer.Start();
+                }
+                return;
+            }
             _stillPending = false;
+            _lastStillStart = DateTime.UtcNow;
             try
             {
+                UpdateCrop();
                 RequestFrame();
                 if (_frame == null) return;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -553,6 +572,53 @@ namespace FisheyeDewarp
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        /// <summary>
+        /// Keeps the live decode cropped to the part of the fisheye the view samples, plus a margin so panning and
+        /// zooming out stay sharp until the next frame. Re-crops when the view leaves the crop or shrinks well inside it.
+        /// </summary>
+        private void UpdateCrop()
+        {
+            if (_live == null || _originalSize.IsEmpty) return;
+            Rect need = ViewBounds();
+            if (need.IsEmpty) return;
+            double needArea = need.Width * need.Height, cropArea = _crop.Width * _crop.Height;
+            if (_crop.Contains(need) && needArea > 0.3 * cropArea) return;
+
+            double mx = Math.Max(0.04, need.Width * 0.3), my = Math.Max(0.04, need.Height * 0.3);
+            double x0 = Math.Max(0, need.Left - mx), y0 = Math.Max(0, need.Top - my);
+            double x1 = Math.Min(1, need.Right + mx), y1 = Math.Min(1, need.Bottom + my);
+            _crop = new Rect(x0, y0, x1 - x0, y1 - y0);
+            _live.SetCrop(_crop, _originalSize);
+            if (_cropLogs++ < 10)
+                Log.Info($"Live decode crop {_crop.X:F3},{_crop.Y:F3} {_crop.Width:F3}x{_crop.Height:F3} ({_crop.Width * _crop.Height * 100:F0}% of the image) for {_view}");
+        }
+
+        /// <summary>The part of the fisheye image (fractions 0..1) the current view samples, from a grid of view rays.</summary>
+        private Rect ViewBounds()
+        {
+            Size paint = _addOn.PaintSizeWpf;
+            double aspect = paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
+            double tanX = Math.Tan(_view.Fov / 2), tanY = tanX / aspect;
+            double[,] m = _view.Rotation();
+            double tanHalfLens = Math.Tan(LensHalfFov / 2);
+            const int n = 16;
+            double minX = 1, minY = 1, maxX = 0, maxY = 0;
+            bool any = false;
+            for (int j = 0; j <= n; j++)
+                for (int i = 0; i <= n; i++)
+                {
+                    if (!SnapshotRenderer.MapToSource(m, tanX, tanY, LensHalfFov, tanHalfLens, i, j, n + 1, n + 1, out double ix, out double iy)) continue;
+                    any = true;
+                    minX = Math.Min(minX, ix); maxX = Math.Max(maxX, ix);
+                    minY = Math.Min(minY, iy); maxY = Math.Max(maxY, iy);
+                }
+            if (!any) return Rect.Empty;
+            // The grid samples pixel centres; widen by one grid step so the edges of the view are covered too.
+            double padX = (maxX - minX) / n, padY = (maxY - minY) / n;
+            return new Rect(Math.Max(0, minX - padX), Math.Max(0, minY - padY),
+                Math.Min(1, maxX + padX) - Math.Max(0, minX - padX), Math.Min(1, maxY + padY) - Math.Max(0, minY - padY));
+        }
+
         /// <summary>Runs the tile's own live decode while dewarp is on in Live, and stops it otherwise.</summary>
         private void UpdateLiveDecoder()
         {
@@ -576,9 +642,9 @@ namespace FisheyeDewarp
                     {
                         if (_live != decoder || !Enabled) return;
                         // Never let the sharp view get softer than grabbing would make it.
-                        if (frame.Width < size.Width || frame.Height < size.Height)
+                        if (frame.FullWidth < size.Width * 0.98 || frame.FullHeight < size.Height * 0.98)
                         {
-                            if (_smallLiveLogs++ < 3) Log.Info($"Live decode frame {frame.Width}x{frame.Height} is smaller than the camera's {size.Width}x{size.Height}; ignored, grabbing instead");
+                            if (_smallLiveLogs++ < 3) Log.Info($"Live decode frame {frame.Width}x{frame.Height} (crop {frame.Crop}) is coarser than the camera's {size.Width}x{size.Height}; ignored, grabbing instead");
                             return;
                         }
                         _lastLiveFrameUtc = DateTime.UtcNow;
@@ -589,6 +655,8 @@ namespace FisheyeDewarp
                     })));
                 _live = decoder;
                 _liveRefused = decoder == null;
+                _crop = new Rect(0, 0, 1, 1);
+                _cropLogs = 0;
             }
             else if (!want)
             {
@@ -602,6 +670,11 @@ namespace FisheyeDewarp
         }
 
         private bool _liveRefused;
+        private static readonly TimeSpan MinStillInterval = TimeSpan.FromMilliseconds(33);
+        private DateTime _lastStillStart;
+        private DispatcherTimer _stillTimer;
+        private Rect _crop = new Rect(0, 0, 1, 1);
+        private int _cropLogs;
         private bool _noSharp;   // SPIKE: shader only, to measure what the shader costs on its own
         private int _smallLiveLogs;
         private DateTime _lastLiveFrameUtc;
