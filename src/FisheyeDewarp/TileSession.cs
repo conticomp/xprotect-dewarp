@@ -231,6 +231,7 @@ namespace FisheyeDewarp
                 controller = _addOn.WindowInformation?.PlaybackControllerFQID;
                 var replies = VideoOS.Platform.EnvironmentManager.Instance.SendMessage(
                     new Message(MessageId.SmartClient.GetTimelineSelectedIntervalRequest), controller);
+                _loggedSelectionError = null;
                 foreach (object reply in replies)
                 {
                     if (!(reply is VideoOS.Platform.Util.TimeInterval interval) || interval.Duration <= TimeSpan.Zero) continue;

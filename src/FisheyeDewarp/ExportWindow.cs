@@ -167,11 +167,16 @@ namespace FisheyeDewarp
         /// </summary>
         private bool ApplyTimelineSelection(bool force)
         {
-            if (!_session.TryGetTimelineSelection(out DateTime startUtc, out DateTime endUtc)) return false;
+            if (!_session.TryGetTimelineSelection(out DateTime startUtc, out DateTime endUtc))
+            {
+                _lastSelection = null;   // so selecting the same span again counts as a change
+                return false;
+            }
             if (!force && _lastSelection == (startUtc, endUtc)) return true;
             _lastSelection = (startUtc, endUtc);
+            // The fields hold whole seconds: the start rounds down and the end rounds up, so the export covers the selection.
             _start.Text = startUtc.ToLocalTime().ToString(TimeFormat);
-            _end.Text = endUtc.ToLocalTime().ToString(TimeFormat);
+            _end.Text = new DateTime((endUtc.Ticks + TimeSpan.TicksPerSecond - 1) / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc).ToLocalTime().ToString(TimeFormat);
             _status.Text = $"Start and end taken from the timeline selection ({FormatDuration(endUtc - startUtc)}).";
             return true;
         }
