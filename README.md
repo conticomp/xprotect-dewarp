@@ -25,8 +25,9 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 - **Virtual PTZ.** Drag to look around, scroll to zoom in or out, double-click to reset the view.
 - **Full-resolution sharpness.** The dewarped view is rendered from the camera's full-resolution frame, not the down-scaled tile image,
   so detail is comparable to Axis Optimizer.
-- **Dewarped snapshot to clipboard.** One click copies the current dewarped view to the clipboard at up to the camera's native
-  detail, ready to paste into a report or email.
+- **Dewarped snapshot.** One click copies the current dewarped view to the clipboard at up to the camera's native detail, ready to
+  paste into a report or email; Shift+click saves it as a PNG file instead. Like the video export, it checks the user's export
+  permission and writes an XProtect audit log entry.
 - **Dewarped video export to MP4.** Export the tile's dewarped view for a time range, with an optional burned-in camera name and
   timestamp. It checks the user's export permission and writes an XProtect audit log entry.
 - **No extra video streams for viewing.** Live and playback dewarping use the frames Smart Client already receives. Only an export
@@ -129,10 +130,23 @@ powershell -ExecutionPolicy Bypass -File .\deploy.ps1 -StartClient # ...and star
 | Zoom in or out | Scroll the mouse wheel |
 | Reset the view | Double-click the tile |
 | Copy the dewarped view | Click **Dewarped snapshot**, then paste (Ctrl+V) into Word, Outlook, Paint, etc. |
+| Save the dewarped view as a picture | **Shift+click** **Dewarped snapshot** and choose where to save the PNG |
 | Export the dewarped view as video | Click **Export dewarped video** (see below) |
 
 While dewarping is on, Smart Client's own digital zoom is turned off for that tile, so the two don't fight over the mouse. It comes back
 when you turn dewarping off.
+
+### Snapshots
+
+**Dewarped snapshot** is greyed out until Dewarp is on for the tile, because it captures the dewarped view. A click copies the view to
+the clipboard. Shift+click opens a save dialog instead, with the file named `<camera> <frame time> dewarped.png` in
+`Pictures\Dewarp snapshots` (or the last folder you saved to).
+
+A snapshot takes video out of XProtect, so it follows the same rules as an export: it needs XProtect's **Export** permission on the
+camera, and a denied attempt and every snapshot taken are recorded in the audit log, for example:
+
+> Jane Doe (CORP\jdoe) took a dewarped snapshot of Lobby 360 at 2026-10-15 09:12:31 -04:00 (mount=Ceiling pan=42.0 tilt=55.3 fov=60.0,
+> 2560x1440) on OPS-WS07 to the clipboard
 
 ### Exporting dewarped video
 
@@ -158,7 +172,7 @@ audit log. Each completed export is also recorded, for example:
 > Jane Doe (CORP\jdoe) exported dewarped video of Lobby 360 from 2026-10-15 09:12:00 -04:00 to 2026-10-15 09:14:30 -04:00 (1200 frames)
 > on OPS-WS07 to C:\Users\jdoe\Videos\Dewarp exports\Lobby 360 2026-10-15 091200 dewarped.mp4
 
-In Management Client, look under **Server Logs > Audit logs** (category **Export**).
+In Management Client, look under **Server Logs > Audit logs** (category **Export**). Snapshot entries are in the same place.
 
 ## Known limitations
 
@@ -177,8 +191,6 @@ In Management Client, look under **Server Logs > Audit logs** (category **Export
   up to six parts that run in parallel. On a test PC, 60 s of 8 fps video took about 20 s. Expect roughly real time or faster; a long
   range at a high frame rate takes a while. Each running export opens up to six playback connections to the recording server.
 - **Exports are limited to 4 hours** per export.
-- **Snapshots are not audited.** They are copied to the clipboard without an XProtect audit log entry or export-permission check. If your
-  organisation requires audited exports, account for this before deploying.
 - **CPU use** grows with the number of dewarped tiles, since each one is re-rendered on the CPU. Test with your typical number of tiles.
 
 ## Troubleshooting

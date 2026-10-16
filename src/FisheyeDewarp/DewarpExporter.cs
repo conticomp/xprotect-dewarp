@@ -56,33 +56,6 @@ namespace FisheyeDewarp
         private const int MaxParallel = 6;
         private static readonly TimeSpan MinChunk = TimeSpan.FromSeconds(10);
 
-        private const string ExportAction = "EXPORT";
-        private const string AuditApp = "FisheyeDewarp";
-        private const string AuditComponent = "Export";
-        private const string AuditExported = "DewarpedExport";
-        private const string AuditDenied = "DewarpedExportDenied";
-        private static readonly object AuditGate = new object();
-        private static bool _auditRegistered;
-
-        /// <summary>
-        /// Whether the current user may export this camera. A denial is written to the audit log, since it is
-        /// an attempt to export.
-        /// </summary>
-        public static bool CheckPermission(Item camera)
-        {
-            try
-            {
-                SecurityAccess.CheckPermission(camera, ExportAction);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log.Info($"Export denied for camera='{camera?.Name}': {ex.Message}");
-                Audit(AuditDenied, camera, PermissionState.Denied, new Dictionary<string, string> { ["camera"] = camera?.Name ?? "" });
-                return false;
-            }
-        }
-
         /// <summary>
         /// Runs the export on background threads and reports progress (0..1) and the result from them.
         /// BitmapVideoSource must be used from a single thread, so each chunk gets its own.
@@ -123,8 +96,8 @@ namespace FisheyeDewarp
 
         private static ExportResult Run(ExportRequest r, Action<double> progress, CancellationToken cancel)
         {
-            Log.Info($"Export start user='{CurrentUser()}' {Describe(r)}");
-            if (!CheckPermission(r.Camera))
+            Log.Info($"Export start user='{Audit.CurrentUser()}' {Describe(r)}");
+            if (!Audit.CheckExportPermission(r.Camera, Audit.ExportDenied))
                 return new ExportResult { Message = "You do not have permission to export video from this camera." };
             var total = Stopwatch.StartNew();
 
@@ -196,11 +169,11 @@ namespace FisheyeDewarp
                 Log.Info($"Export done {frames} frames in {count} chunks, {sec:F1} s ({frames / Math.Max(sec, 0.001):F1} fps; chunks {chunkTime.TotalSeconds:F1} s, join {join.ElapsedMilliseconds} ms) " +
                          $"| {r.Path} ({new FileInfo(r.Path).Length / 1024} KB)");
 
-                Audit(AuditExported, r.Camera, PermissionState.Granted, new Dictionary<string, string>
+                Audit.Entry(Audit.Exported, r.Camera, PermissionState.Granted, new Dictionary<string, string>
                 {
                     ["camera"] = r.Camera.Name,
-                    ["start"] = AuditTime(r.StartUtc),
-                    ["end"] = AuditTime(r.EndUtc),
+                    ["start"] = Audit.Time(r.StartUtc),
+                    ["end"] = Audit.Time(r.EndUtc),
                     ["frames"] = frames.ToString(),
                     ["file"] = r.Path,
                 });
@@ -376,79 +349,6 @@ namespace FisheyeDewarp
                 if (seg.Frames > 0) done += Math.Max(0, (seg.Done - seg.Start).Ticks);
             return Math.Min(0.99, (double)done / Math.Max(1, (r.EndUtc - r.StartUtc).Ticks));
         }
-
-        private static void Audit(string messageId, Item camera, string permission, Dictionary<string, string> values)
-        {
-            try
-            {
-                if (!LogClient.Instance.Initialized)
-                {
-                    Log.Info("Audit: LogClient not initialized, no server audit entry written");
-                    return;
-                }
-                lock (AuditGate)
-                {
-                    if (!_auditRegistered)
-                    {
-                        var messages = new Dictionary<string, LogMessage>
-                        {
-                            [AuditExported] = AuditMessage(AuditExported, "{user} exported dewarped video of {camera} from {start} to {end} ({frames} frames) on {workstation} to {file}"),
-                            [AuditDenied] = AuditMessage(AuditDenied, "{user} was denied dewarped video export of {camera} on {workstation}: no export permission"),
-                        };
-#pragma warning disable CS0618 // the 25.3+ overload with applicationName is not in 25.2
-                        LogClient.Instance.RegisterDictionary(new LogMessageDictionary("en-US", "1.1", AuditApp, AuditComponent, messages, "Camera"));
-#pragma warning restore CS0618
-                        _auditRegistered = true;
-                    }
-                }
-                values["user"] = CurrentUser();
-                values["workstation"] = Environment.MachineName;
-                // AuditEntry never throws: Smart Client queues the write and reports Log Server failures only in
-                // its own logs (C:\ProgramData\Milestone\XProtect Smart Client\LegacyLogClientLog.txt, MIPLog.txt).
-                LogClient.Instance.AuditEntry(AuditApp, AuditComponent, messageId, camera, values, permission);
-                Log.Info($"Audit entry handed to Smart Client: {messageId} (Log Server delivery is not confirmed here; see LegacyLogClientLog.txt)");
-            }
-            catch (Exception ex)
-            {
-                Log.Error("Audit entry could not be handed to Smart Client", ex);
-            }
-        }
-
-        /// <summary>
-        /// The Smart Client user, written into the audit text itself so the entry names who exported even where
-        /// the log viewer's User column is not shown. "Display Name (DOMAIN\account)" when both are known.
-        /// </summary>
-        private static string CurrentUser()
-        {
-            string windowsUser = Environment.UserDomainName + "\\" + Environment.UserName;
-            try
-            {
-                var login = VideoOS.Platform.Login.LoginSettingsCache.GetLoginSettings(EnvironmentManager.Instance.MasterSite);
-                string account = login?.FullyQualifiedUserName;
-                string display = login?.UserName;
-                if (string.IsNullOrWhiteSpace(account)) account = windowsUser;
-                return string.IsNullOrWhiteSpace(display) || display == account ? account : $"{display} ({account})";
-            }
-            catch (Exception ex)
-            {
-                Log.Error("Could not read the logged-in user", ex);
-                return windowsUser;
-            }
-        }
-
-        /// <summary>Local time with its UTC offset, so the entry reads like the timeline and is still unambiguous.</summary>
-        private static string AuditTime(DateTime utc) => utc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz");
-
-        private static LogMessage AuditMessage(string id, string text) => new LogMessage
-        {
-            Id = id,
-            Group = Group.Audit,
-            Category = "Export",
-            Severity = Severity.Info,
-            Status = Status.StatusQuo,
-            RelatedObjectKind = Kind.Camera,
-            Message = text,
-        };
 
         private static int BitrateFor(int width, int height) => (int)Math.Min(20_000_000, Math.Max(2_000_000, width * (long)height * 4));
 

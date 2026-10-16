@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -9,6 +10,7 @@ using System.Windows.Media;
 using BitmapSource = System.Windows.Media.Imaging.BitmapSource;
 using System.Windows.Threading;
 using VideoOS.Platform.Client;
+using VideoOS.Platform.Log;
 using VideoOS.Platform.Messaging;
 
 namespace FisheyeDewarp
@@ -62,6 +64,9 @@ namespace FisheyeDewarp
             _addOn.ImageDisplayedEvent += OnImageDisplayed;
             _addOn.UserControlSizeOrLocationChangedEvent += OnSizeOrLocationChanged;
         }
+
+        /// <summary>Raised on the UI thread when any tile's dewarp is turned on or off.</summary>
+        public static event Action<TileSession> EnabledChanged;
 
         public bool Enabled { get; private set; }
 
@@ -126,6 +131,7 @@ namespace FisheyeDewarp
                 new ActiveElementsOverlayRenderParameters { Placement = OverlayPlacement.FollowImageViewport, ShowAlways = true, ZOrder = 10 });
 
             Enabled = true;
+            EnabledChanged?.Invoke(this);
             _imageEventsLogged = 0;
             _stillLogs = 0;
             _frame = null;
@@ -148,6 +154,7 @@ namespace FisheyeDewarp
             _frame = null;
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
+            EnabledChanged?.Invoke(this);
             Log.Info($"Dewarp OFF {Describe()}");
             return true;
         }
@@ -160,10 +167,11 @@ namespace FisheyeDewarp
         }
 
         /// <summary>
-        /// Copies the current dewarped view to the clipboard, rendered from the full-resolution frame
-        /// rather than the on-screen tile, so it is sharper than what the operator sees.
+        /// Copies the current dewarped view to the clipboard, or saves it as a PNG file, rendered from the
+        /// full-resolution frame rather than the on-screen tile, so it is sharper than what the operator sees.
+        /// Like an export, it needs the camera's Export permission and is written to the audit log.
         /// </summary>
-        public void Snapshot()
+        public void Snapshot(bool saveToFile)
         {
             if (!Enabled)
             {
@@ -173,31 +181,64 @@ namespace FisheyeDewarp
             if (_snapshotBusy) return;
             try
             {
+                VideoOS.Platform.Item camera = Camera;
+                if (camera == null)
+                {
+                    ShowToast("No camera in this tile");
+                    return;
+                }
+                if (!Audit.CheckExportPermission(camera, Audit.SnapshotDenied))
+                {
+                    ShowToast("You do not have permission to export from this camera");
+                    return;
+                }
+
                 BitmapSource frame = _addOn.GetCurrentDisplayedImageAsImageSource(false) as BitmapSource;
                 if (frame == null)
                 {
                     ShowToast("No image to copy yet");
                     return;
                 }
-
+                // Taken before the save dialog, so the snapshot is the frame on screen when the button was clicked.
+                DateTime? frameTime = DisplayedTimeUtc;
                 RenderJob job = PrepareRender(SnapshotRenderer.Capture(frame), fitToScreen: false);
-                _snapshotBusy = true;
-                ShowToast("Copying...", keep: true);
-                string camera = _addOn.CameraName;
                 string view = _view.ToString();
-                Task.Run(job.Render)
+
+                string path = null;
+                if (saveToFile)
+                {
+                    path = AskSnapshotPath(camera.Name, frameTime);
+                    if (path == null) return;
+                }
+
+                _snapshotBusy = true;
+                ShowToast(path == null ? "Copying..." : "Saving...", keep: true);
+                Task.Run(() =>
+                    {
+                        BitmapSource image = job.Render();
+                        if (path != null) SavePng(image, path);
+                        return image;
+                    })
                     .ContinueWith(t =>
                     {
                         _snapshotBusy = false;
                         if (t.IsFaulted)
                         {
                             Log.Error($"Snapshot failed for {Describe()}", t.Exception);
-                            ShowToast("Snapshot failed");
+                            ShowToast(path == null ? "Snapshot failed" : "Could not save the snapshot");
                             return;
                         }
-                        Clipboard.SetImage(t.Result);
-                        Log.Info($"Snapshot {job} camera='{camera}' {view}");
-                        ShowToast("Dewarped snapshot copied to clipboard");
+                        if (path == null) Clipboard.SetImage(t.Result);
+                        Log.Info($"Snapshot {job} camera='{camera.Name}' {view} -> {path ?? "clipboard"}");
+                        Audit.Entry(Audit.Snapshot, camera, PermissionState.Granted, new Dictionary<string, string>
+                        {
+                            ["camera"] = camera.Name,
+                            ["time"] = frameTime.HasValue ? Audit.Time(frameTime.Value) : "an unknown time",
+                            ["view"] = view,
+                            ["size"] = $"{job.Width}x{job.Height}",
+                            ["destination"] = path ?? "the clipboard",
+                        });
+                        ShowToast(path == null ? "Dewarped snapshot copied to clipboard" : "Saved " + Path.GetFileName(path));
                     }, TaskScheduler.FromCurrentSynchronizationContext());
             }
             catch (Exception ex)
@@ -206,6 +247,37 @@ namespace FisheyeDewarp
                 Log.Error($"Snapshot failed for {Describe()}", ex);
                 ShowToast("Snapshot failed");
             }
+        }
+
+        private static string _lastSnapshotFolder;
+
+        /// <summary>Save dialog for a snapshot, named after the camera and frame time. Null when cancelled.</summary>
+        private string AskSnapshotPath(string camera, DateTime? frameTimeUtc)
+        {
+            string folder = _lastSnapshotFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Dewarp snapshots");
+            Directory.CreateDirectory(folder);
+            DateTime time = frameTimeUtc?.ToLocalTime() ?? DateTime.Now;
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Save dewarped snapshot",
+                Filter = "PNG image (*.png)|*.png",
+                DefaultExt = ".png",
+                AddExtension = true,
+                OverwritePrompt = true,
+                InitialDirectory = folder,
+                FileName = $"{ExportWindow.SafeName(camera)} {time:yyyy-MM-dd HHmmss} dewarped.png",
+            };
+            if (dialog.ShowDialog(OwnerWindow) != true) return null;
+            _lastSnapshotFolder = Path.GetDirectoryName(dialog.FileName);
+            return dialog.FileName;
+        }
+
+        private static void SavePng(BitmapSource image, string path)
+        {
+            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
+            using (var file = File.Create(path))
+                encoder.Save(file);
         }
 
         /// <summary>The camera shown in this tile, or null if it is not known yet.</summary>

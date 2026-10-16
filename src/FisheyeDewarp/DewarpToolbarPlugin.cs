@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media;
 using VideoOS.Platform;
 using VideoOS.Platform.Client;
@@ -17,7 +18,7 @@ namespace FisheyeDewarp
         Export,
     }
 
-    /// <summary>Camera tile toolbar buttons, in Live and Playback: the Dewarp toggle and the dewarped Snapshot action.</summary>
+    /// <summary>Camera tile toolbar buttons, in Live and Playback: the Dewarp toggle and the dewarped Snapshot and Export actions.</summary>
     internal sealed class DewarpToolbarPlugin : ViewItemToolbarPlugin
     {
         private readonly ToolbarKind _kind;
@@ -81,9 +82,26 @@ namespace FisheyeDewarp
             else
             {
                 Title = "Dewarped snapshot";
-                Tooltip = "Copy the dewarped view to the clipboard, at full camera resolution.";
                 IconSource = _snapshotIcon ?? (_snapshotIcon = CreateIcon(SnapshotIcon()));
+                TileSession session = DewarpBackgroundPlugin.Find(_windowId, _index);
+                ShowSnapshotState(session != null && session.Enabled);
+                TileSession.EnabledChanged += OnTileEnabledChanged;
             }
+        }
+
+        private void OnTileEnabledChanged(TileSession session)
+        {
+            if (session.WindowId == _windowId && session.ViewItemIndex == _index)
+                ShowSnapshotState(session.Enabled);
+        }
+
+        /// <summary>A snapshot is of the dewarped view, so the button is greyed out while Dewarp is off.</summary>
+        private void ShowSnapshotState(bool dewarpOn)
+        {
+            Enabled = dewarpOn;
+            Tooltip = dewarpOn
+                ? "Copy the dewarped view to the clipboard, at full camera resolution. Shift+click to save it as a PNG file instead."
+                : "Dewarped snapshot: turn on Dewarp first.";
         }
 
         public override void OnIsCheckedChanged()
@@ -100,7 +118,7 @@ namespace FisheyeDewarp
                 TileSession session = FindSession();
                 if (session != null) ExportWindow.ShowFor(session);
             }
-            else FindSession()?.Snapshot();
+            else FindSession()?.Snapshot(saveToFile: (Keyboard.Modifiers & ModifierKeys.Shift) != 0);
         }
 
         private TileSession FindSession()
@@ -113,6 +131,7 @@ namespace FisheyeDewarp
 
         public override void Close()
         {
+            TileSession.EnabledChanged -= OnTileEnabledChanged;
         }
 
         /// <summary>A lens circle with a highlighted view window.</summary>
