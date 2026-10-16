@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Threading;
 using VideoOS.Platform;
 using VideoOS.Platform.Live;
@@ -174,16 +173,7 @@ namespace FisheyeDewarp
                 : new System.Windows.Rect(0, 0, 1, 1);
             var planes = new byte[3][];
             for (int p = 0; p < 3; p++)
-            {
-                int width = content.GetPlaneWidth(p), height = content.GetPlaneHeight(p), stride = content.GetPlaneStride(p);
-                planes[p] = new byte[width * height];
-                IntPtr scan0 = content.GetPlanePointer(p);
-                if (stride == width)
-                    Marshal.Copy(scan0, planes[p], 0, width * height);
-                else
-                    for (int y = 0; y < height; y++)
-                        Marshal.Copy(scan0 + y * stride, planes[p], y * width, width);
-            }
+                planes[p] = SourceFrame.CopyPlane(content.GetPlanePointer(p), content.GetPlaneWidth(p), content.GetPlaneHeight(p), content.GetPlaneStride(p));
             return new SourceFrame(planes[0], planes[1], planes[2], content.GetPlaneWidth(0), content.GetPlaneHeight(0),
                 content.GetPlaneWidth(1), content.GetPlaneHeight(1), crop);
         }

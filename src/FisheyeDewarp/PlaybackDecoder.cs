@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Threading;
 using VideoOS.Platform;
 using VideoOS.Platform.Data;
@@ -27,6 +26,13 @@ namespace FisheyeDewarp
         // After a crop change with no new request, wait this long for one before fetching the same frame again
         // at the new crop: while playing, the next request comes within a frame and a re-fetch would be a seek.
         private const int RefetchDelayMs = 250;
+
+        /// <summary>
+        /// Key frames (every 2 s or so) take about 400 ms to decode, so a frame can arrive a few frames late, and
+        /// showing it beats flashing the soft view. A frame further from the video underneath (after a jump on the
+        /// timeline) would look smeared, so the tile shows the soft view until the reader catches up.
+        /// </summary>
+        public static readonly TimeSpan MaxLag = TimeSpan.FromSeconds(1);
 
         private readonly Item _camera;
         private readonly string _cameraName;
@@ -209,9 +215,12 @@ namespace FisheyeDewarp
                     _maxFetchTicks = Math.Max(_maxFetchTicks, ticks);
                     _decodeStatus = $"{frame.HardwareDecodingStatus}";
                 }
-                SourceFrame copy = Copy(frame);
                 // A frame decoded before a crop change has the old size; its crop is unknown, so skip it.
-                if (copy == null || Math.Abs(copy.FullWidth - _fullSize.Width) > 4 || _disposed) return;
+                if (Math.Abs(frame.GetPlaneWidth(0) / _appliedCrop.Width - _fullSize.Width) > 4 || _disposed) return;
+                // After a jump on the timeline, a frame for the time before it would only be dropped by the tile.
+                lock (_gate)
+                    if (_hasRequest && (_requested - _lastTime).Duration() > MaxLag) return;
+                SourceFrame copy = Copy(frame);
                 _deliveredTime = target;
                 _deliveredCrop = _appliedCrop;
                 _hasDelivered = true;
@@ -229,16 +238,7 @@ namespace FisheyeDewarp
                 throw new NotSupportedException($"Playback frames arrive as {frame.Format}, which the sharp view cannot use");
             var planes = new byte[3][];
             for (int p = 0; p < 3; p++)
-            {
-                int width = frame.GetPlaneWidth(p), height = frame.GetPlaneHeight(p), stride = frame.GetPlaneStride(p);
-                planes[p] = new byte[width * height];
-                IntPtr scan0 = frame.GetPlanePointer(p);
-                if (stride == width)
-                    Marshal.Copy(scan0, planes[p], 0, width * height);
-                else
-                    for (int y = 0; y < height; y++)
-                        Marshal.Copy(scan0 + y * stride, planes[p], y * width, width);
-            }
+                planes[p] = SourceFrame.CopyPlane(frame.GetPlanePointer(p), frame.GetPlaneWidth(p), frame.GetPlaneHeight(p), frame.GetPlaneStride(p));
             return new SourceFrame(planes[0], planes[1], planes[2], frame.GetPlaneWidth(0), frame.GetPlaneHeight(0),
                 frame.GetPlaneWidth(1), frame.GetPlaneHeight(1), _appliedCrop);
         }

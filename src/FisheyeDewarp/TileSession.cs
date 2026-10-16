@@ -516,8 +516,7 @@ namespace FisheyeDewarp
         private void RequestFrame()
         {
             if (_grabbing || !Enabled || !_frameStale) return;
-            if (LiveFeeding) return;
-            if (_playback != null) return;   // the playback reader supplies the frames
+            if (DecoderFeeding) return;
             if (_frame != null && Steering) return;
             if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
@@ -569,7 +568,7 @@ namespace FisheyeDewarp
                     Log.Info($"Frame grab recovered after {_grabFailures} failure(s) for {Describe()}");
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
-                if (LiveFeeding || _playback != null) return;   // a decoded frame newer than this grab is already showing
+                if (DecoderFeeding) return;   // a decoded frame newer than this grab is already showing
                 if (grabInLive != _stillInLive)
                 {
                     // Grabbed before a Live/Playback switch, so it shows the other mode's picture: grab again.
@@ -741,10 +740,7 @@ namespace FisheyeDewarp
         {
             if (_playback != from || !Enabled || _addOn.InLiveMode) return;
             DateTime shown = DisplayedTimeUtc ?? time;
-            // Key frames (every 2 s or so) take about 400 ms to decode, so a frame can arrive a few frames late;
-            // showing it is better than flashing the soft view. A frame further from the video underneath (after a
-            // jump on the timeline) would look smeared, so the soft view shows until the reader catches up.
-            if (Math.Abs((shown - time).TotalMilliseconds) > PlaybackLagMaxMs)
+            if ((shown - time).Duration() > PlaybackDecoder.MaxLag)
             {
                 _frame = null;   // or panning would render it again
                 if (_still != null) _still.Visibility = Visibility.Collapsed;
@@ -754,8 +750,6 @@ namespace FisheyeDewarp
             _frameStale = false;
             RenderStill();
         }
-
-        private const double PlaybackLagMaxMs = 1000;
 
         private void OnLiveFrame(LiveDecoder from, SourceFrame frame)
         {
@@ -770,6 +764,9 @@ namespace FisheyeDewarp
 
         /// <summary>The live decode is delivering frames, so Smart Client's frames are neither grabbed nor rendered.</summary>
         private bool LiveFeeding => _live != null && DateTime.UtcNow - _lastLiveFrameUtc < LiveStall;
+
+        /// <summary>The tile's own decode supplies the frames, so Smart Client's are not grabbed.</summary>
+        private bool DecoderFeeding => LiveFeeding || _playback != null;
 
         private static readonly Rect WholeImage = new Rect(0, 0, 1, 1);
 
