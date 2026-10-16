@@ -151,6 +151,8 @@ namespace FisheyeDewarp
             _stillLogs = 0;
             _frame = null;
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
+            _noSharp = System.IO.File.Exists(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "no-sharp"));
+            if (_noSharp) Log.Info($"SPIKE: sharp view turned off by the no-sharp file; shader only for {Describe()}");
             UpdateLiveDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
@@ -417,7 +419,7 @@ namespace FisheyeDewarp
         /// </summary>
         private void RenderStill()
         {
-            if (!Enabled || _still == null) return;
+            if (!Enabled || _still == null || _noSharp) return;
             if (_stillBusy)
             {
                 _stillPending = true;
@@ -554,7 +556,7 @@ namespace FisheyeDewarp
         /// <summary>Runs the tile's own live decode while dewarp is on in Live, and stops it otherwise.</summary>
         private void UpdateLiveDecoder()
         {
-            bool want = Enabled && _addOn.InLiveMode;
+            bool want = Enabled && _addOn.InLiveMode && !_noSharp;
             if (want && _live == null && !_liveRefused)
             {
                 VideoOS.Platform.Item camera = Camera;
@@ -600,6 +602,7 @@ namespace FisheyeDewarp
         }
 
         private bool _liveRefused;
+        private bool _noSharp;   // SPIKE: shader only, to measure what the shader costs on its own
         private int _smallLiveLogs;
         private DateTime _lastLiveFrameUtc;
 
