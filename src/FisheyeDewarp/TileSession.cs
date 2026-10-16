@@ -742,8 +742,16 @@ namespace FisheyeDewarp
         private void OnPlaybackFrame(PlaybackDecoder from, SourceFrame frame, DateTime time)
         {
             if (_playback != from || !Enabled || _addOn.InLiveMode) return;
-            if (_playbackFrameLogs++ < 20)
-                Log.Info($"Playback frame {frame.Width}x{frame.Height} at {time:HH:mm:ss.fff}, Smart Client shows {DisplayedTimeUtc:HH:mm:ss.fff}");
+            DateTime shown = DisplayedTimeUtc ?? time;
+            bool stale = Math.Abs((shown - time).TotalMilliseconds) > 250;
+            if (_playbackFrameLogs++ < 30)
+                Log.Info($"Playback frame {frame.Width}x{frame.Height} at {time:HH:mm:ss.fff}, Smart Client shows {shown:HH:mm:ss.fff}{(stale ? " - stale, not shown" : "")}");
+            // A frame from another moment than the video underneath looks smeared; the soft view is better.
+            if (stale)
+            {
+                if (_still != null) _still.Visibility = Visibility.Collapsed;
+                return;
+            }
             _frame = frame;
             _frameStale = false;
             RenderStill();

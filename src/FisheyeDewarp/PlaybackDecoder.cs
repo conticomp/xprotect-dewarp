@@ -15,6 +15,9 @@ namespace FisheyeDewarp
     internal sealed class PlaybackDecoder : IDisposable
     {
         private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(10);
+        // Ahead by up to this much, step frame by frame: a seek decodes from the previous key frame, about 1 s.
+        private static readonly TimeSpan MaxStep = TimeSpan.FromSeconds(3);
+        private static bool _hardwareRequested;
 
         private readonly Item _camera;
         private readonly string _cameraName;
@@ -54,6 +57,14 @@ namespace FisheyeDewarp
             _thread.Start();
             _statsTimer = new Timer(_ => LogStats(), null, StatsInterval, StatsInterval);
             string hw = EnvironmentManager.Instance.EnvironmentOptions.TryGetValue(EnvironmentOptions.HardwareDecodingMode, out string mode) ? mode : "(not set)";
+            if (!_hardwareRequested && string.IsNullOrEmpty(mode))
+            {
+                // Unset in Smart Client, and MIP's playback sources then decode on the CPU (about 120 ms a frame).
+                _hardwareRequested = true;
+                EnvironmentManager.Instance.EnvironmentOptions[EnvironmentOptions.HardwareDecodingMode] = EnvironmentOptions.OptionHardwareDecodingModeAuto;
+                EnvironmentManager.Instance.FireEnvironmentOptionsChangedEvent();
+                hw += " -> " + EnvironmentOptions.OptionHardwareDecodingModeAuto;
+            }
             Log.Info($"Playback decode START camera='{_cameraName}' size={fullSize.Width}x{fullSize.Height} HardwareDecodingMode={hw}");
         }
 
@@ -125,14 +136,13 @@ namespace FisheyeDewarp
             _source.SetWidthHeight();
             _source.ResumeSettingsUpdate();
             _appliedCrop = crop;
-            _hasLast = false;   // the next fetch seeks, so it is decoded with the new crop
         }
 
         private void Fetch(DateTime target)
         {
             long start = Stopwatch.GetTimestamp();
             object got;
-            bool sequential = _hasLast && target > _lastTime && target <= _nextTime;
+            bool sequential = _hasLast && target > _lastTime && target - _lastTime <= MaxStep;
             if (sequential)
             {
                 // Playing forward: step to the frame Smart Client shows, decoding any skipped frames on the way.
@@ -169,6 +179,8 @@ namespace FisheyeDewarp
                     _decodeStatus = $"{frame.HardwareDecodingStatus} {frame.Format} {frame.ColorSpace}";
                 }
                 SourceFrame copy = Copy(frame);
+                // A frame decoded before a crop change has the old size; its crop is unknown, so skip it.
+                if (copy != null && Math.Abs(copy.FullWidth - _fullSize.Width) > 4) copy = null;
                 if (copy != null && !_disposed) _onFrame(copy, _lastTime);
             }
             finally
