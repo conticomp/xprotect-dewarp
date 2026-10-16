@@ -30,8 +30,9 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
   permission and writes an XProtect audit log entry.
 - **Dewarped video export to MP4.** Export the tile's dewarped view for a time range, with an optional burned-in camera name and
   timestamp. It checks the user's export permission and writes an XProtect audit log entry.
-- **No extra video streams for viewing.** Live and playback dewarping use the frames Smart Client already receives. Only an export
-  opens its own playback connections to the recording server, while it runs.
+- **Smooth sharp view in Live.** Each dewarped Live tile decodes its own full-resolution stream (on the GPU where available), so the
+  sharp view keeps up with the camera instead of refreshing once or twice a second. Only the part of the fisheye image the view needs is
+  decoded.
 
 ## Requirements
 
@@ -176,9 +177,10 @@ In Management Client, look under **Server Logs > Audit logs** (category **Export
 
 ## Known limitations
 
-- **Live refresh rate.** In Live, the sharp view refreshes only about once or twice a second. Smart Client takes roughly 0.4–0.9 s to hand
-  over each full-resolution frame. Dragging and zooming stay smooth, because the plugin keeps dewarping the frame it already has. Paused
-  and stepped playback are unaffected.
+- **One extra stream per dewarped Live tile.** The sharp view in Live opens its own live stream from the recording server for each
+  dewarped tile, while Dewarp is on. On a LAN this is usually unnoticeable; over a slow or remote link, four dewarped tiles of a 12 MP
+  camera mean four extra full-resolution streams. Playback uses no extra stream. To turn the extra stream off, see
+  [Troubleshooting](#troubleshooting).
 - **Ceiling mount only.** Wall-mount geometry exists in the code but has no setting yet.
 - **The lens is hard-coded** to a stereographic 182° lens with the image circle filling the frame (Axis M4328-P). Other fisheye cameras may look
   slightly distorted.
@@ -191,7 +193,9 @@ In Management Client, look under **Server Logs > Audit logs** (category **Export
   up to six parts that run in parallel. On a test PC, 60 s of 8 fps video took about 20 s. Expect roughly real time or faster; a long
   range at a high frame rate takes a while. Each running export opens up to six playback connections to the recording server.
 - **Exports are limited to 4 hours** per export.
-- **CPU use** grows with the number of dewarped tiles, since each one is re-rendered on the CPU. Test with your typical number of tiles.
+- **CPU use** grows with the number of dewarped tiles, since each one is decoded and re-rendered. On a 22-core test PC with an Axis
+  M3058 at 8 fps, one dewarped Live tile used about 3% of Smart Client's CPU when still and about 7% while panning; four tiles used
+  about 11–12%. Test with your typical number of tiles.
 
 ## Troubleshooting
 
@@ -209,6 +213,7 @@ The plugin writes a log to:
 | Export fails with "Media Foundation is not installed" | Windows N: install the Media Feature Pack. Windows Server: `Install-WindowsFeature Server-Media-Foundation`, then restart. |
 | Export says there is no recorded video | Check the time range in Playback; the camera may not have recorded then. |
 | Smart Client shows an `SEHException` in `GetCurrentImage` | Smart Client could not hand over a full-resolution frame, usually because the connection to the VMS dropped. The plugin waits for a new frame and backs off (up to 30 s) before trying again, so the error should not repeat while the connection is down. The tile keeps its shader view meanwhile. |
+| Live sharp view uses too much bandwidth or CPU | Create an empty file named `no-live-decode` in `%LOCALAPPDATA%\FisheyeDewarp` and turn Dewarp off and on. The tile then grabs frames from Smart Client as before: no extra stream, but the sharp view refreshes only once or twice a second in Live. Delete the file to undo. |
 | Slow over Remote Desktop | Expected, because RDP uses software rendering. Evaluate at the physical workstation. |
 
 ## Uninstall
@@ -238,8 +243,11 @@ comes from the tag. The MSI uses the tag without its suffix (`v0.2.0-beta.1` →
   for that tile.
 - **Fast view:** a WPF pixel shader (HLSL compiled at runtime with `d3dcompiler_47.dll`) set as the tile's `VideoEffect` dewarps the image
   Smart Client is already drawing. It is instant, but limited to the tile's resolution.
-- **Sharp view:** the plugin grabs the full-resolution decoded frame in the background, dewarps it on the CPU with the same lens math, and
-  shows it on top of the fast view. While the operator steers, it re-dewarps the frame already in hand (about 15–30 ms per render).
+- **Sharp view:** the plugin dewarps the full-resolution frame on the CPU with the same lens math and shows it on top of the fast view.
+  In Live, each dewarped tile opens its own `BitmapLiveSource`, cropped to the part of the fisheye image the view samples (plus a
+  margin), decoded by MIP as YCbCr 4:2:0, so only the sampled pixels are converted to RGB. In Playback, or when the live decode is off,
+  it grabs the frame Smart Client is showing. The source position of each output pixel is computed exactly every 8 pixels and
+  interpolated between, and reused until the view changes, so a still view costs a few milliseconds per frame on up to four threads.
 - **Export:** the range is split into up to six parts, each on its own thread with its own `BitmapVideoSource`, which fetches the recorded
   frames at full resolution. A lookup table built once per export dewarps each frame. The camera name and time are drawn with GDI+,
   and Windows Media Foundation encodes H.264 into a temporary MP4. The parts are then joined into one MP4 without re-encoding, keeping
