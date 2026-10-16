@@ -153,6 +153,8 @@ namespace FisheyeDewarp
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
             _noSharp = System.IO.File.Exists(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "no-sharp"));
             if (_noSharp) Log.Info($"SPIKE: sharp view turned off by the no-sharp file; shader only for {Describe()}");
+            _decodeOnly = System.IO.File.Exists(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "decode-only"));
+            if (_decodeOnly) Log.Info($"SPIKE: decode-only file present; live frames are decoded and copied but not rendered for {Describe()}");
             UpdateLiveDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
@@ -648,9 +650,10 @@ namespace FisheyeDewarp
                             return;
                         }
                         _lastLiveFrameUtc = DateTime.UtcNow;
+                        System.Threading.Interlocked.Increment(ref SharpFrames);
+                        if (_decodeOnly) return;
                         _frame = frame;
                         _frameStale = false;
-                        System.Threading.Interlocked.Increment(ref SharpFrames);
                         RenderStill();
                     })));
                 _live = decoder;
@@ -675,6 +678,7 @@ namespace FisheyeDewarp
         private DispatcherTimer _stillTimer;
         private Rect _crop = new Rect(0, 0, 1, 1);
         private int _cropLogs;
+        private bool _decodeOnly;   // SPIKE: live decode runs, nothing is rendered, to measure the decoder alone
         private bool _noSharp;   // SPIKE: shader only, to measure what the shader costs on its own
         private int _smallLiveLogs;
         private DateTime _lastLiveFrameUtc;
