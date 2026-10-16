@@ -128,25 +128,74 @@ namespace FisheyeDewarp
 
         public float[] Positions { get; }
 
+        // The map is exact on a grid every GridStep pixels and interpolated between: the lens mapping is smooth, so
+        // the error stays far below a pixel, and panning (a new map every frame) costs 1/64 of the trig.
+        private const int GridStep = 8;
+
         public static RenderMap Build(double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
         {
             double tanHalfLens = Math.Tan(lensHalfFov / 2);
+            int gw = (width - 1 + GridStep - 1) / GridStep + 1, gh = (height - 1 + GridStep - 1) / GridStep + 1;
+            if (gw < 2 || gh < 2) return BuildExact(m, tanX, tanY, lensHalfFov, tanHalfLens, width, height);
+            var grid = new float[2 * gw * gh];
+            for (int gy = 0; gy < gh; gy++)
+                for (int gx = 0; gx < gw; gx++)
+                {
+                    int i = 2 * (gy * gw + gx);
+                    Exact(m, tanX, tanY, lensHalfFov, tanHalfLens, GridX(gx, width), GridX(gy, height), width, height, grid, i);
+                }
+
             var xy = new float[2 * width * height];
             Parallel.For(0, height, new ParallelOptions { MaxDegreeOfParallelism = 4 }, y =>
             {
+                int gy = Math.Min(y / GridStep, gh - 2);
+                int y0 = GridX(gy, height), y1 = GridX(gy + 1, height);
+                float fy = y1 > y0 ? (float)(y - y0) / (y1 - y0) : 0;
                 for (int x = 0; x < width; x++)
                 {
                     int i = 2 * (y * width + x);
-                    if (SnapshotRenderer.MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy))
+                    int gx = Math.Min(x / GridStep, gw - 2);
+                    int x0 = GridX(gx, width), x1 = GridX(gx + 1, width);
+                    float fx = x1 > x0 ? (float)(x - x0) / (x1 - x0) : 0;
+                    int c00 = 2 * (gy * gw + gx), c10 = c00 + 2, c01 = c00 + 2 * gw, c11 = c01 + 2;
+                    // At the lens edge part of the cell is outside the lens; map those pixels exactly.
+                    if (float.IsNaN(grid[c00]) || float.IsNaN(grid[c10]) || float.IsNaN(grid[c01]) || float.IsNaN(grid[c11]))
                     {
-                        xy[i] = (float)ix;
-                        xy[i + 1] = (float)iy;
+                        Exact(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, xy, i);
+                        continue;
                     }
-                    else
-                        xy[i] = xy[i + 1] = float.NaN;
+                    for (int k = 0; k < 2; k++)
+                    {
+                        float top = grid[c00 + k] + (grid[c10 + k] - grid[c00 + k]) * fx;
+                        float bottom = grid[c01 + k] + (grid[c11 + k] - grid[c01 + k]) * fx;
+                        xy[i + k] = top + (bottom - top) * fy;
+                    }
                 }
             });
             return new RenderMap(m, tanX, tanY, lensHalfFov, width, height, xy);
+        }
+
+        private static RenderMap BuildExact(double[,] m, double tanX, double tanY, double lensHalfFov, double tanHalfLens, int width, int height)
+        {
+            var xy = new float[2 * width * height];
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                    Exact(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, xy, 2 * (y * width + x));
+            return new RenderMap(m, tanX, tanY, lensHalfFov, width, height, xy);
+        }
+
+        private static int GridX(int g, int size) => Math.Min(g * GridStep, size - 1);
+
+        private static void Exact(double[,] m, double tanX, double tanY, double lensHalfFov, double tanHalfLens,
+            int x, int y, int width, int height, float[] into, int i)
+        {
+            if (SnapshotRenderer.MapToSource(m, tanX, tanY, lensHalfFov, tanHalfLens, x, y, width, height, out double ix, out double iy))
+            {
+                into[i] = (float)ix;
+                into[i + 1] = (float)iy;
+            }
+            else
+                into[i] = into[i + 1] = float.NaN;
         }
 
         public bool Matches(double[,] m, double tanX, double tanY, double lensHalfFov, int width, int height)
