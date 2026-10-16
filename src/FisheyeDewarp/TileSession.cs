@@ -743,7 +743,9 @@ namespace FisheyeDewarp
         {
             if (_playback != from || !Enabled || _addOn.InLiveMode) return;
             DateTime shown = DisplayedTimeUtc ?? time;
-            bool stale = Math.Abs((shown - time).TotalMilliseconds) > 250;
+            // Key frames (every ~2 s) take ~400 ms to decode, so a frame can arrive a few frames late; showing it
+            // is better than flashing the soft view. Only a frame far from the video underneath is hidden.
+            bool stale = Math.Abs((shown - time).TotalMilliseconds) > 1000;
             if (_playbackFrameLogs++ < 30)
                 Log.Info($"Playback frame {frame.Width}x{frame.Height} at {time:HH:mm:ss.fff}, Smart Client shows {shown:HH:mm:ss.fff}{(stale ? " - stale, not shown" : "")}");
             // A frame from another moment than the video underneath looks smeared; the soft view is better.
