@@ -139,8 +139,11 @@ when you turn dewarping off.
 1. Turn on **Dewarp** on the tile and aim the view at what you want to export.
 2. Click **Export dewarped video**. A window opens next to Smart Client. It does not block Smart Client, so you can keep using the
    timeline.
-3. Set **Start** and **End**. They default to 30 seconds either side of the frame on screen. To use the time shown in the tile, scrub
-   the timeline to it and press **Displayed time** next to Start or End.
+3. Set **Start** and **End**. The easiest way is to select the span on the Smart Client timeline (its time selection, or the start and
+   end markers in Export mode): Start and End fill in from the selection when the window opens and follow it while the window stays
+   open. **Use timeline selection** pulls it in again after you have typed over it. With no selection they default to 30 seconds either
+   side of the frame on screen. To use the time shown in the tile, scrub the timeline to it and press **Displayed time** next to Start
+   or End.
 4. Choose the width (**1920** or **1280** pixels; the height follows the tile's shape), whether to burn in the camera name and time, and
    the folder. The default folder is `Videos\Dewarp exports`.
 5. Press **Export**. The view is taken from the tile at that moment, and the video shows exactly what the tile shows. A progress bar
@@ -150,7 +153,12 @@ Files are named `<camera> <start time> dewarped.mp4`, with `(2)`, `(3)`... added
 keeps the recording's real frame times, so it plays at the camera's recorded frame rate.
 
 If the user does not have XProtect's **Export** permission on the camera, the window does not open, and the attempt is recorded in the
-audit log. Each completed export is also recorded (camera, time range, file, user).
+audit log. Each completed export is also recorded, for example:
+
+> Jane Doe (CORP\jdoe) exported dewarped video of Lobby 360 from 2026-10-15 09:12:00 -04:00 to 2026-10-15 09:14:30 -04:00 (1200 frames)
+> on OPS-WS07 to C:\Users\jdoe\Videos\Dewarp exports\Lobby 360 2026-10-15 091200 dewarped.mp4
+
+In Management Client, look under **Server Logs > Audit logs** (category **Export**).
 
 ## Known limitations
 

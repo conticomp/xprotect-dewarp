@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using VideoOS.Platform;
 using VideoOS.Platform.UI.Controls;
 
@@ -13,6 +14,7 @@ namespace FisheyeDewarp
     /// <summary>
     /// "Export dewarped video" for one tile. Modeless, so the operator can keep scrubbing the timeline and
     /// take the start and end from what the tile shows. The view is taken from the tile when Export is pressed.
+    /// The start and end follow the Smart Client's timeline selection while the window is open.
     /// </summary>
     internal sealed class ExportWindow : VideoOSWindow
     {
@@ -29,8 +31,10 @@ namespace FisheyeDewarp
         private readonly TextBlock _status;
         private readonly Button _export, _close, _openFolder;
         private readonly List<UIElement> _inputs = new List<UIElement>();
+        private readonly DispatcherTimer _selectionTimer;
         private CancellationTokenSource _cancel;
         private string _lastFile;
+        private (DateTime Start, DateTime End)? _lastSelection;
 
         public static void ShowFor(TileSession session)
         {
@@ -81,6 +85,16 @@ namespace FisheyeDewarp
             DateTime now = DateTime.Now;
             _start = new VideoOSTextBoxMedium { Text = shown.AddSeconds(-30).ToString(TimeFormat), Width = 170 };
             _end = new VideoOSTextBoxMedium { Text = (shown.AddSeconds(30) > now ? now : shown.AddSeconds(30)).ToString(TimeFormat), Width = 170 };
+            var fromSelection = new VideoOSButtonSecondaryMedium
+            {
+                Content = "Use timeline selection",
+                ToolTip = "Take the start and end from the span selected on the Smart Client timeline",
+            };
+            fromSelection.Click += (s, e) =>
+            {
+                if (!ApplyTimelineSelection(force: true))
+                    _status.Text = "Nothing is selected on the timeline. Use the timeline's time selection (or Export mode) to mark a start and end.";
+            };
             _folder = new VideoOSTextBoxMedium
             {
                 Text = _lastFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "Dewarp exports"),
@@ -105,16 +119,17 @@ namespace FisheyeDewarp
             AddRow(grid, ref row, "Camera", new VideoOSTextBlockBodyMedium { Text = camera.Name, VerticalAlignment = VerticalAlignment.Center });
             AddRow(grid, ref row, "Start", Inline(_start, UseDisplayedButton(_start)));
             AddRow(grid, ref row, "End", Inline(_end, UseDisplayedButton(_end)));
+            AddRow(grid, ref row, "", fromSelection);
             AddRow(grid, ref row, "Size", Inline(_size1080, _size720));
             AddRow(grid, ref row, "", _burnIn);
             var browse = new VideoOSButtonSecondaryMedium { Content = "Browse...", Margin = new Thickness(8, 0, 0, 0) };
             browse.Click += (s, e) => Browse();
             AddRow(grid, ref row, "Save to", Inline(_folder, browse));
-            _inputs.AddRange(new UIElement[] { _start, _end, _folder, _size1080, _size720, _burnIn, browse });
+            _inputs.AddRange(new UIElement[] { _start, _end, fromSelection, _folder, _size1080, _size720, _burnIn, browse });
 
             var hint = new VideoOSTextBlockBodySmall
             {
-                Text = "The export frames exactly what the tile shows (same view and shape) at the moment you press Export. Keep scrubbing the timeline and use \"Displayed time\" to pick the start and end.",
+                Text = "The export frames exactly what the tile shows (same view and shape) at the moment you press Export. Select a span on the timeline and the start and end follow it, or scrub and use \"Displayed time\".",
                 TextWrapping = TextWrapping.Wrap,
                 MaxWidth = 460,
                 Margin = new Thickness(0, 12, 0, 0),
@@ -136,7 +151,33 @@ namespace FisheyeDewarp
             Content = root;
 
             Closing += (s, e) => _cancel?.Cancel();   // the export stops at its next frame and removes its files
+
+            // The Smart Client raises no event when the timeline selection changes, so look once a second.
+            // Fields are only overwritten when the selection itself changes, so typed times survive.
+            ApplyTimelineSelection(force: false);
+            _selectionTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromSeconds(1) };
+            _selectionTimer.Tick += (s, e) => { if (_cancel == null) ApplyTimelineSelection(force: false); };
+            _selectionTimer.Start();
+            Closed += (s, e) => _selectionTimer.Stop();
         }
+
+        /// <summary>
+        /// Copies the timeline selection into Start and End. Without force, only when it differs from the
+        /// selection applied last. False when nothing is selected.
+        /// </summary>
+        private bool ApplyTimelineSelection(bool force)
+        {
+            if (!_session.TryGetTimelineSelection(out DateTime startUtc, out DateTime endUtc)) return false;
+            if (!force && _lastSelection == (startUtc, endUtc)) return true;
+            _lastSelection = (startUtc, endUtc);
+            _start.Text = startUtc.ToLocalTime().ToString(TimeFormat);
+            _end.Text = endUtc.ToLocalTime().ToString(TimeFormat);
+            _status.Text = $"Start and end taken from the timeline selection ({FormatDuration(endUtc - startUtc)}).";
+            return true;
+        }
+
+        private static string FormatDuration(TimeSpan d) =>
+            d.TotalHours >= 1 ? $"{(int)d.TotalHours} h {d.Minutes} min" : d.TotalMinutes >= 1 ? $"{d.Minutes} min {d.Seconds} s" : $"{Math.Max(1, (int)Math.Round(d.TotalSeconds))} s";
 
         private Button UseDisplayedButton(TextBox target)
         {

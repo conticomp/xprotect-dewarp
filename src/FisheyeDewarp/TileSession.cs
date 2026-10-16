@@ -214,6 +214,37 @@ namespace FisheyeDewarp
             : _lastImageTime.Kind == DateTimeKind.Local ? _lastImageTime.ToUniversalTime()
             : DateTime.SpecifyKind(_lastImageTime, DateTimeKind.Utc);
 
+        /// <summary>
+        /// The span selected on the timeline of this tile's window (the Smart Client's "time selection", also
+        /// set by its own export mode), in UTC. False when nothing is selected.
+        /// </summary>
+        public bool TryGetTimelineSelection(out DateTime startUtc, out DateTime endUtc)
+        {
+            startUtc = endUtc = default;
+            try
+            {
+                // Null addresses the main window's timeline; a floating window has its own playback controller.
+                VideoOS.Platform.FQID controller = _addOn.WindowInformation?.PlaybackControllerFQID;
+                var replies = VideoOS.Platform.EnvironmentManager.Instance.SendMessage(
+                    new Message(MessageId.SmartClient.GetTimelineSelectedIntervalRequest), controller);
+                foreach (object reply in replies)
+                {
+                    if (!(reply is VideoOS.Platform.Util.TimeInterval interval) || interval.Duration <= TimeSpan.Zero) continue;
+                    startUtc = ToUtc(interval.StartTime);
+                    endUtc = ToUtc(interval.EndTime);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Timeline selection request failed for {Describe()}", ex);
+            }
+            return false;
+        }
+
+        private static DateTime ToUtc(DateTime t) =>
+            t.Kind == DateTimeKind.Local ? t.ToUniversalTime() : DateTime.SpecifyKind(t, DateTimeKind.Utc);
+
         /// <summary>The camera's full frame size, from the last frame shown.</summary>
         public System.Drawing.Size SourceSize => _originalSize;
 
