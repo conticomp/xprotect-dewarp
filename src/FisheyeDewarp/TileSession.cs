@@ -59,6 +59,12 @@ namespace FisheyeDewarp
         private TimeSpan _grabBackoff = GrabBackoffMin;
         private DateTime _grabRetryAt;
         private int _grabFailures;
+
+        // SPIKE: in Live, frames come from the tile's own decoded stream instead of Smart Client's slow grab.
+        private LiveDecoder _live;
+
+        /// <summary>SPIKE: new full-resolution frames taken by all tiles (grabbed or decoded), for the CPU log.</summary>
+        public static int SharpFrames;
         private DateTime _lastWheel;
 
         // Latest frame the tile showed, for the export's default times and source size.
@@ -145,6 +151,7 @@ namespace FisheyeDewarp
             _stillLogs = 0;
             _frame = null;
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
+            UpdateLiveDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
@@ -163,6 +170,7 @@ namespace FisheyeDewarp
             _frame = null;
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
+            UpdateLiveDecoder();
             EnabledChanged?.Invoke(this);
             Log.Info($"Dewarp OFF {Describe()}");
             return true;
@@ -462,6 +470,7 @@ namespace FisheyeDewarp
         private void RequestFrame()
         {
             if (_grabbing || !Enabled || !_frameStale) return;
+            if (_live != null && _live.Receiving) return;
             if (_frame != null && Steering) return;
             if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
@@ -513,6 +522,7 @@ namespace FisheyeDewarp
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
                 _frame = frame;
+                System.Threading.Interlocked.Increment(ref SharpFrames);
                 RenderStill();
             };
 
@@ -540,6 +550,48 @@ namespace FisheyeDewarp
                 done(t.Result);
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
+
+        /// <summary>Runs the tile's own live decode while dewarp is on in Live, and stops it otherwise.</summary>
+        private void UpdateLiveDecoder()
+        {
+            bool want = Enabled && _addOn.InLiveMode;
+            if (want && _live == null && !_liveRefused)
+            {
+                VideoOS.Platform.Item camera = Camera;
+                if (camera == null) return;
+                if (!LiveDecoder.Allowed)
+                {
+                    _liveRefused = true;
+                    Log.Info($"Live decode turned off by the no-live-decode file; grabbing frames from Smart Client for {Describe()}");
+                    return;
+                }
+                Dispatcher dispatcher = _input?.Dispatcher;
+                if (dispatcher == null) return;
+                LiveDecoder decoder = null;
+                decoder = LiveDecoder.Start(camera, _addOn.StreamId, frame =>
+                    dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (_live != decoder || !Enabled) return;
+                        _frame = frame;
+                        _frameStale = false;
+                        System.Threading.Interlocked.Increment(ref SharpFrames);
+                        RenderStill();
+                    })));
+                _live = decoder;
+                _liveRefused = decoder == null;
+            }
+            else if (!want)
+            {
+                _liveRefused = false;
+                if (_live != null)
+                {
+                    _live.Dispose();
+                    _live = null;
+                }
+            }
+        }
+
+        private bool _liveRefused;
 
         private void ShowToast(string text, bool keep = false)
         {
@@ -630,6 +682,7 @@ namespace FisheyeDewarp
         private void OnFrame(Rect area)
         {
             if (!Enabled) return;
+            UpdateLiveDecoder();   // follows the tile between Live and Playback
             if (area != _lastArea || _addOn.PaintSizeWpf != _lastPaint) UpdateGeometry();
             _frameStale = true;
             RenderStill();
