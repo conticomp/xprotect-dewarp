@@ -78,12 +78,7 @@ namespace FisheyeDewarp
             catch (Exception ex)
             {
                 Log.Info($"Export denied for camera='{camera?.Name}': {ex.Message}");
-                Audit(AuditDenied, camera, PermissionState.Denied, new Dictionary<string, string>
-                {
-                    ["user"] = CurrentUser(),
-                    ["workstation"] = Environment.MachineName,
-                    ["camera"] = camera?.Name ?? "",
-                });
+                Audit(AuditDenied, camera, PermissionState.Denied, new Dictionary<string, string> { ["camera"] = camera?.Name ?? "" });
                 return false;
             }
         }
@@ -203,8 +198,6 @@ namespace FisheyeDewarp
 
                 Audit(AuditExported, r.Camera, PermissionState.Granted, new Dictionary<string, string>
                 {
-                    ["user"] = CurrentUser(),
-                    ["workstation"] = Environment.MachineName,
                     ["camera"] = r.Camera.Name,
                     ["start"] = AuditTime(r.StartUtc),
                     ["end"] = AuditTime(r.EndUtc),
@@ -408,12 +401,16 @@ namespace FisheyeDewarp
                         _auditRegistered = true;
                     }
                 }
+                values["user"] = CurrentUser();
+                values["workstation"] = Environment.MachineName;
+                // AuditEntry never throws: Smart Client queues the write and reports Log Server failures only in
+                // its own logs (C:\ProgramData\Milestone\XProtect Smart Client\LegacyLogClientLog.txt, MIPLog.txt).
                 LogClient.Instance.AuditEntry(AuditApp, AuditComponent, messageId, camera, values, permission);
-                Log.Info($"Audit entry written: {messageId}");
+                Log.Info($"Audit entry handed to Smart Client: {messageId} (Log Server delivery is not confirmed here; see LegacyLogClientLog.txt)");
             }
             catch (Exception ex)
             {
-                Log.Error("Audit entry failed", ex);
+                Log.Error("Audit entry could not be handed to Smart Client", ex);
             }
         }
 
@@ -423,18 +420,19 @@ namespace FisheyeDewarp
         /// </summary>
         private static string CurrentUser()
         {
+            string windowsUser = Environment.UserDomainName + "\\" + Environment.UserName;
             try
             {
                 var login = VideoOS.Platform.Login.LoginSettingsCache.GetLoginSettings(EnvironmentManager.Instance.MasterSite);
                 string account = login?.FullyQualifiedUserName;
                 string display = login?.UserName;
-                if (string.IsNullOrWhiteSpace(account)) account = Environment.UserDomainName + "\\" + Environment.UserName;
+                if (string.IsNullOrWhiteSpace(account)) account = windowsUser;
                 return string.IsNullOrWhiteSpace(display) || display == account ? account : $"{display} ({account})";
             }
             catch (Exception ex)
             {
                 Log.Error("Could not read the logged-in user", ex);
-                return Environment.UserDomainName + "\\" + Environment.UserName;
+                return windowsUser;
             }
         }
 
@@ -454,7 +452,7 @@ namespace FisheyeDewarp
 
         private static int BitrateFor(int width, int height) => (int)Math.Min(20_000_000, Math.Max(2_000_000, width * (long)height * 4));
 
-        private static DateTime ToUtc(DateTime t) => t.Kind == DateTimeKind.Local ? t.ToUniversalTime() : DateTime.SpecifyKind(t, DateTimeKind.Utc);
+        internal static DateTime ToUtc(DateTime t) => t.Kind == DateTimeKind.Local ? t.ToUniversalTime() : DateTime.SpecifyKind(t, DateTimeKind.Utc);
 
         private static string Per(Stopwatch sw, int frames) => frames == 0 ? "-" : (sw.Elapsed.TotalMilliseconds / frames).ToString("F1");
 
