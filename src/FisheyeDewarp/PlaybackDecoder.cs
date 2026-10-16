@@ -52,6 +52,7 @@ namespace FisheyeDewarp
         // Worker-thread state.
         private BitmapVideoSource _source;
         private System.Windows.Rect _appliedCrop;
+        private int _appliedWidth, _appliedHeight;   // the frame size asked for with _appliedCrop
         private DateTime _lastTime;       // the frame the source is positioned on
         private bool _hasLast;
         private DateTime _deliveredTime;  // the last frame handed to the tile, at _deliveredCrop
@@ -76,7 +77,10 @@ namespace FisheyeDewarp
             {
                 if (_failed) return true;
                 long started = Interlocked.Read(ref _callStarted);
-                return started != 0 && Stopwatch.GetTimestamp() - started > StallLimit.TotalSeconds * Stopwatch.Frequency;
+                if (started == 0 || Stopwatch.GetTimestamp() - started <= StallLimit.TotalSeconds * Stopwatch.Frequency) return false;
+                _failed = true;   // stays given up even if the call returns later, so the tile stops this reader
+                Log.Info($"Playback decode camera='{_cameraName}': a call into the source has run over {StallLimit.TotalSeconds:F0} s; giving up");
+                return true;
             }
         }
 
@@ -187,8 +191,10 @@ namespace FisheyeDewarp
             Busy();
             _source.SuspendSettingsUpdate();
             _source.SetCropRectangle(crop.X, crop.Y, crop.Width, crop.Height);
-            _source.Width = Math.Max(16, (int)Math.Ceiling(crop.Width * _fullSize.Width));
-            _source.Height = Math.Max(16, (int)Math.Ceiling(crop.Height * _fullSize.Height));
+            _appliedWidth = Math.Max(16, (int)Math.Ceiling(crop.Width * _fullSize.Width));
+            _appliedHeight = Math.Max(16, (int)Math.Ceiling(crop.Height * _fullSize.Height));
+            _source.Width = _appliedWidth;
+            _source.Height = _appliedHeight;
             _source.SetWidthHeight();
             _source.ResumeSettingsUpdate();
             _appliedCrop = crop;
@@ -238,9 +244,9 @@ namespace FisheyeDewarp
                     _maxFetchTicks = Math.Max(_maxFetchTicks, ticks);
                     _decodeStatus = $"{frame.HardwareDecodingStatus}";
                 }
-                // A frame decoded before a crop change has the old size; its crop is unknown, so skip it.
-                double fullWidth = frame.GetPlaneWidth(0) / _appliedCrop.Width;
-                if (fullWidth < _fullSize.Width * 0.98 || fullWidth > _fullSize.Width * 1.02 || _disposed) return;
+                // A frame decoded before a crop change has the old size; its crop is unknown, so skip it. A few pixels
+                // of difference is the decoder rounding the size for 4:2:0.
+                if (Math.Abs(frame.GetPlaneWidth(0) - _appliedWidth) > 4 || Math.Abs(frame.GetPlaneHeight(0) - _appliedHeight) > 4 || _disposed) return;
                 // After a jump on the timeline, a frame for the time before it would only be dropped by the tile.
                 lock (_gate)
                     if (_hasRequest && (_requested - _lastTime).Duration() > MaxLag) return;
