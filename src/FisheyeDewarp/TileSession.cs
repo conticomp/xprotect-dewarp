@@ -469,6 +469,7 @@ namespace FisheyeDewarp
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 RenderJob job = PrepareRender(_frame, fitToScreen: true);
                 Size paint = _lastPaint;
+                bool renderInLive = _stillInLive;
                 _stillBusy = true;
                 Task.Run(job.Render).ContinueWith(t =>
                 {
@@ -482,7 +483,7 @@ namespace FisheyeDewarp
                     if (_stillLogs++ < 8)
                         Log.Info($"Sharp render {job}, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
                     if (_still == null) return;
-                    if (paint == _lastPaint && _frame != null)   // null: the mode changed while rendering
+                    if (paint == _lastPaint && _frame != null && renderInLive == _stillInLive)   // else the mode changed while rendering
                     {
                         _still.Source = t.Result;
                         _still.Visibility = Visibility.Visible;
@@ -562,7 +563,13 @@ namespace FisheyeDewarp
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
                 if (LiveFeeding) return;   // a decoded frame newer than this grab is already showing
-                if (grabInLive != _stillInLive) return;   // grabbed before a Live/Playback switch: the other mode's picture
+                if (grabInLive != _stillInLive)
+                {
+                    // Grabbed before a Live/Playback switch, so it shows the other mode's picture: grab again.
+                    _frameStale = true;
+                    RenderStill();
+                    return;
+                }
                 _frame = frame;
                 RenderStill();
             };
