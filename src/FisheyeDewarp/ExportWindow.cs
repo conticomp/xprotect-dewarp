@@ -50,7 +50,7 @@ namespace FisheyeDewarp
                 VideoOSMessageBox.Show(owner, "Export dewarped video", "No camera", "This tile has no camera to export from.", VideoOSMessageBox.Buttons.OK);
                 return;
             }
-            if (!DewarpExporter.CheckPermission(camera))
+            if (!Audit.CheckExportPermission(camera, Audit.ExportDenied))
             {
                 VideoOSMessageBox.Show(owner, "Export dewarped video", "Export not allowed",
                     $"You do not have permission to export video from {camera.Name}.", VideoOSMessageBox.Buttons.OK);
@@ -324,7 +324,7 @@ namespace FisheyeDewarp
             return ok;
         }
 
-        private static string SafeName(string name) => string.Concat(name.Split(Path.GetInvalidFileNameChars())).Trim();
+        internal static string SafeName(string name) => string.Concat(name.Split(Path.GetInvalidFileNameChars())).Trim();
 
         private static string UniquePath(string folder, string baseName)
         {
