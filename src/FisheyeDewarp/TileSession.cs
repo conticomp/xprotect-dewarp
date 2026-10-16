@@ -50,6 +50,15 @@ namespace FisheyeDewarp
         private bool _grabbing;
         private bool _grabOnUiThread;
         private int _grabLogs;
+
+        // A failed grab makes Smart Client log the error and show its exception dialog, so after a failure no grab
+        // is tried again before _grabRetryAt, and the wait doubles while the failures continue. This happens when
+        // the connection to the VMS drops.
+        private static readonly TimeSpan GrabBackoffMin = TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan GrabBackoffMax = TimeSpan.FromSeconds(30);
+        private TimeSpan _grabBackoff = GrabBackoffMin;
+        private DateTime _grabRetryAt;
+        private int _grabFailures;
         private DateTime _lastWheel;
 
         // Latest frame the tile showed, for the export's default times and source size.
@@ -135,7 +144,7 @@ namespace FisheyeDewarp
             _imageEventsLogged = 0;
             _stillLogs = 0;
             _frame = null;
-            _frameStale = true;
+            _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
@@ -447,12 +456,14 @@ namespace FisheyeDewarp
         /// <summary>
         /// Fetch the latest full-resolution frame in the background. Smart Client's frame grab can take
         /// hundreds of milliseconds in Live, so it runs off the UI thread when Smart Client allows it,
-        /// and never while the operator is steering.
+        /// and never while the operator is steering. Only a frame Smart Client has newly displayed is
+        /// fetched; with no new frame there is nothing new to fetch, and a grab then is likely to fail.
         /// </summary>
         private void RequestFrame()
         {
-            if (_grabbing || !Enabled || (!_frameStale && _frame != null)) return;
+            if (_grabbing || !Enabled || !_frameStale) return;
             if (_frame != null && Steering) return;
+            if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
             _frameStale = false;
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -489,10 +500,18 @@ namespace FisheyeDewarp
                 if (!Enabled) return;
                 if (frame == null)
                 {
-                    _frameStale = true;
-                    if (_noFrameLogs++ < 3) Log.Info($"No full-resolution frame available yet for {Describe()}");
+                    // Wait for a new frame and the backoff before trying again.
+                    _grabFailures++;
+                    _grabRetryAt = DateTime.UtcNow + _grabBackoff;
+                    if (_noFrameLogs++ < 3 || _grabFailures == 1)
+                        Log.Info($"No full-resolution frame from Smart Client (failure {_grabFailures}, next try in {_grabBackoff.TotalSeconds:F0} s or later) for {Describe()}");
+                    _grabBackoff = TimeSpan.FromTicks(Math.Min(GrabBackoffMax.Ticks, _grabBackoff.Ticks * 2));
                     return;
                 }
+                if (_grabFailures > 0)
+                    Log.Info($"Frame grab recovered after {_grabFailures} failure(s) for {Describe()}");
+                _grabFailures = 0;
+                _grabBackoff = GrabBackoffMin;
                 _frame = frame;
                 RenderStill();
             };
