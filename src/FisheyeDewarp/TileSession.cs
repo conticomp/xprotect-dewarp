@@ -59,6 +59,22 @@ namespace FisheyeDewarp
         private TimeSpan _grabBackoff = GrabBackoffMin;
         private DateTime _grabRetryAt;
         private int _grabFailures;
+
+        // In Live, frames come from the tile's own decoded stream instead of Smart Client's slow grab.
+        private LiveDecoder _live;
+        private bool _liveRefused;
+        private bool _stillInLive;   // the mode _frame came from
+        private DateTime _lastLiveFrameUtc;
+        // After this long without a decoded frame, the tile goes back to grabbing Smart Client's frames.
+        private static readonly TimeSpan LiveStall = TimeSpan.FromSeconds(2);
+        private Rect _crop = WholeImage;
+        private int _cropLogs;
+
+        // Mouse moves arrive far faster than the eye needs; sharp renders are capped at about 30 per second.
+        private static readonly TimeSpan MinStillInterval = TimeSpan.FromMilliseconds(33);
+        private DateTime _lastStillStart;
+        private DispatcherTimer _stillTimer;
+        private RenderMap _renderMap;   // the still's pixel map, reused while the view stays put
         private DateTime _lastWheel;
 
         // Latest frame the tile showed, for the export's default times and source size.
@@ -145,6 +161,8 @@ namespace FisheyeDewarp
             _stillLogs = 0;
             _frame = null;
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
+            _stillInLive = _addOn.InLiveMode;
+            UpdateLiveDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
@@ -163,6 +181,7 @@ namespace FisheyeDewarp
             _frame = null;
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
+            UpdateLiveDecoder();
             EnabledChanged?.Invoke(this);
             Log.Info($"Dewarp OFF {Describe()}");
             return true;
@@ -379,16 +398,14 @@ namespace FisheyeDewarp
         /// </summary>
         private RenderJob PrepareRender(SourceFrame source, bool fitToScreen)
         {
-            Size paint = _addOn.PaintSizeWpf;
-            double aspect = paint.Width > 0 && paint.Height > 0 ? paint.Width / paint.Height : 16.0 / 9;
-            double tanX = Math.Tan(_view.Fov / 2), tanY = tanX / aspect;
-            double[,] m = _view.Rotation();
+            ViewLens(out double[,] m, out double tanX, out double tanY);
+            double aspect = tanX / tanY;
 
             int width;
             if (fitToScreen)
             {
                 double scale = _input != null ? VisualTreeHelper.GetDpi(_input).DpiScaleX : 1;
-                width = (int)Math.Max(64, Math.Round(paint.Width * scale));
+                width = (int)Math.Max(64, Math.Round(_addOn.PaintSizeWpf.Width * scale));
             }
             else
             {
@@ -396,11 +413,19 @@ namespace FisheyeDewarp
                 // snapshot neither throws detail away nor pretends to more than the camera captured.
                 double theta = Math.Acos(Math.Max(-1, Math.Min(1, m[2, 2])));
                 double halfCos = Math.Cos(theta / 2);
-                double pixelsPerRadian = source.Width / 2.0 / (2 * Math.Tan(LensHalfFov / 2) * halfCos * halfCos);
+                double pixelsPerRadian = source.FullWidth / 2.0 / (2 * Math.Tan(LensHalfFov / 2) * halfCos * halfCos);
                 width = (int)Math.Max(1280, Math.Min(3840, pixelsPerRadian * 2 * tanX));
             }
             int height = Math.Max(1, (int)Math.Round(width / aspect));
-            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height);
+            return new RenderJob(source, m, tanX, tanY, LensHalfFov, width, height, fitToScreen ? _renderMap : null);
+        }
+
+        /// <summary>The virtual camera for the tile's current view and shape, as the CPU render and the crop use it.</summary>
+        private void ViewLens(out double[,] m, out double tanX, out double tanY)
+        {
+            m = _view.Rotation();
+            tanX = Math.Tan(_view.Fov / 2);
+            tanY = tanX / TileAspect;
         }
 
         /// <summary>
@@ -415,18 +440,41 @@ namespace FisheyeDewarp
                 _stillPending = true;
                 return;
             }
+            TimeSpan sinceLast = DateTime.UtcNow - _lastStillStart;
+            if (sinceLast < MinStillInterval)
+            {
+                if (_stillTimer == null)
+                {
+                    _stillTimer = new DispatcherTimer();
+                    _stillTimer.Tick += (sender, e) =>
+                    {
+                        _stillTimer.Stop();
+                        RenderStill();
+                    };
+                }
+                if (!_stillTimer.IsEnabled)
+                {
+                    _stillTimer.Interval = MinStillInterval - sinceLast;
+                    _stillTimer.Start();
+                }
+                return;
+            }
             _stillPending = false;
+            _lastStillStart = DateTime.UtcNow;
             try
             {
+                UpdateCrop();
                 RequestFrame();
                 if (_frame == null) return;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 RenderJob job = PrepareRender(_frame, fitToScreen: true);
                 Size paint = _lastPaint;
+                bool renderInLive = _stillInLive;
                 _stillBusy = true;
                 Task.Run(job.Render).ContinueWith(t =>
                 {
                     _stillBusy = false;
+                    _renderMap = t.IsFaulted ? null : job.Map;   // a failed build may have half-written the arrays it borrowed
                     if (t.IsFaulted)
                     {
                         Log.Error($"Sharp render failed for {Describe()}", t.Exception);
@@ -435,7 +483,7 @@ namespace FisheyeDewarp
                     if (_stillLogs++ < 8)
                         Log.Info($"Sharp render {job}, total {sw.ElapsedMilliseconds} ms, live={_addOn.InLiveMode}");
                     if (_still == null) return;
-                    if (paint == _lastPaint)
+                    if (paint == _lastPaint && _frame != null && renderInLive == _stillInLive)   // else the mode changed while rendering
                     {
                         _still.Source = t.Result;
                         _still.Visibility = Visibility.Visible;
@@ -462,12 +510,14 @@ namespace FisheyeDewarp
         private void RequestFrame()
         {
             if (_grabbing || !Enabled || !_frameStale) return;
+            if (LiveFeeding) return;
             if (_frame != null && Steering) return;
             if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
             _frameStale = false;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool onUi = _grabOnUiThread;
+            bool grabInLive = _stillInLive;
 
             Func<SourceFrame> grab = () =>
             {
@@ -512,6 +562,14 @@ namespace FisheyeDewarp
                     Log.Info($"Frame grab recovered after {_grabFailures} failure(s) for {Describe()}");
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
+                if (LiveFeeding) return;   // a decoded frame newer than this grab is already showing
+                if (grabInLive != _stillInLive)
+                {
+                    // Grabbed before a Live/Playback switch, so it shows the other mode's picture: grab again.
+                    _frameStale = true;
+                    RenderStill();
+                    return;
+                }
                 _frame = frame;
                 RenderStill();
             };
@@ -540,6 +598,111 @@ namespace FisheyeDewarp
                 done(t.Result);
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
+
+        /// <summary>
+        /// Keeps the live decode cropped to the part of the fisheye the view samples, plus a margin so panning and
+        /// zooming out stay sharp until the next frame. Re-crops when the view leaves the crop or shrinks well inside it.
+        /// </summary>
+        private void UpdateCrop()
+        {
+            if (_live == null || _originalSize.IsEmpty) return;
+            Rect need = ViewBounds();
+            if (need.IsEmpty) return;
+            Rect fresh = need;
+            fresh.Inflate(Math.Max(0.04, need.Width * 0.3), Math.Max(0.04, need.Height * 0.3));
+            fresh.Intersect(WholeImage);
+            // Keep the current crop while it covers the view and is not much larger than a fresh one would be.
+            if (_crop.Contains(need) && _crop.Width * _crop.Height <= 2 * fresh.Width * fresh.Height) return;
+            _crop = fresh;
+            _live.SetCrop(_crop);
+            if (_cropLogs++ < 10)
+                Log.Info($"Live decode crop {_crop.X:F3},{_crop.Y:F3} {_crop.Width:F3}x{_crop.Height:F3} ({_crop.Width * _crop.Height * 100:F0}% of the image) for {_view}");
+        }
+
+        /// <summary>The part of the fisheye image (fractions 0..1) the current view samples, from a grid of view rays.</summary>
+        private Rect ViewBounds()
+        {
+            ViewLens(out double[,] m, out double tanX, out double tanY);
+            double tanHalfLens = Math.Tan(LensHalfFov / 2);
+            const int n = 16;
+            Rect bounds = Rect.Empty;
+            for (int j = 0; j <= n; j++)
+                for (int i = 0; i <= n; i++)
+                    if (SnapshotRenderer.MapToSource(m, tanX, tanY, LensHalfFov, tanHalfLens, i, j, n + 1, n + 1, out double ix, out double iy))
+                        bounds.Union(new Point(ix, iy));
+            if (bounds.IsEmpty) return bounds;
+            // The grid samples pixel centres; widen by one grid step so the edges of the view are covered too.
+            bounds.Inflate(bounds.Width / n, bounds.Height / n);
+            bounds.Intersect(WholeImage);
+            return bounds;
+        }
+
+        /// <summary>Runs the tile's own live decode while dewarp is on in Live, and stops it otherwise.</summary>
+        private void UpdateLiveDecoder()
+        {
+            bool want = Enabled && _addOn.InLiveMode;
+            if (Enabled && _addOn.InLiveMode != _stillInLive)
+            {
+                // The still shows the other mode's picture (e.g. the last playback frame over live video); hide it
+                // until a frame from this mode arrives.
+                _stillInLive = _addOn.InLiveMode;
+                _frame = null;
+                _frameStale = true;
+                if (_still != null) _still.Visibility = Visibility.Collapsed;
+            }
+            if (_live != null && _live.GaveUp)
+            {
+                _live.Dispose();
+                _live = null;
+                _lastLiveFrameUtc = default;
+                _liveRefused = true;
+                _frameStale = true;
+            }
+            if (want && _live == null && !_liveRefused)
+            {
+                VideoOS.Platform.Item camera = Camera;
+                if (camera == null || _originalSize.IsEmpty) return;   // the size comes from the first displayed frame
+                if (!LiveDecoder.Allowed)
+                {
+                    _liveRefused = true;
+                    Log.Info($"Live decode turned off by the no-live-decode file; grabbing frames from Smart Client for {Describe()}");
+                    return;
+                }
+                Dispatcher dispatcher = _input?.Dispatcher;
+                if (dispatcher == null) return;
+                LiveDecoder decoder = null;
+                decoder = LiveDecoder.Start(camera, _addOn.StreamId, _originalSize, frame =>
+                    dispatcher.BeginInvoke(new Action(() => OnLiveFrame(decoder, frame))));
+                _live = decoder;
+                _lastLiveFrameUtc = default;
+                _liveRefused = decoder == null;
+                _crop = WholeImage;
+                _cropLogs = 0;
+            }
+            else if (!want)
+            {
+                _liveRefused = false;
+                _live?.Dispose();
+                _live = null;
+                _lastLiveFrameUtc = default;
+            }
+        }
+
+        private void OnLiveFrame(LiveDecoder from, SourceFrame frame)
+        {
+            from.Delivered();
+            UpdateLiveDecoder();   // a switch to Playback shows up here first: the decode keeps delivering until stopped
+            if (_live != from) return;
+            _lastLiveFrameUtc = DateTime.UtcNow;
+            _frame = frame;
+            _frameStale = false;
+            RenderStill();
+        }
+
+        /// <summary>The live decode is delivering frames, so Smart Client's frames are neither grabbed nor rendered.</summary>
+        private bool LiveFeeding => _live != null && DateTime.UtcNow - _lastLiveFrameUtc < LiveStall;
+
+        private static readonly Rect WholeImage = new Rect(0, 0, 1, 1);
 
         private void ShowToast(string text, bool keep = false)
         {
@@ -630,7 +793,15 @@ namespace FisheyeDewarp
         private void OnFrame(Rect area)
         {
             if (!Enabled) return;
-            if (area != _lastArea || _addOn.PaintSizeWpf != _lastPaint) UpdateGeometry();
+            UpdateLiveDecoder();   // follows the tile between Live and Playback
+            bool resized = area != _lastArea || _addOn.PaintSizeWpf != _lastPaint;
+            if (resized) UpdateGeometry();
+            if (LiveFeeding)
+            {
+                // The decode's own frames trigger the renders; this one would redo the same frame.
+                if (resized) RenderStill();
+                return;
+            }
             _frameStale = true;
             RenderStill();
         }

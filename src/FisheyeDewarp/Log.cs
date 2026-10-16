@@ -7,8 +7,11 @@ namespace FisheyeDewarp
     internal static class Log
     {
         private static readonly object Gate = new object();
-        private static readonly string FilePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp", "dewarp.log");
+        /// <summary>%LOCALAPPDATA%\FisheyeDewarp: the log, and flag files that change the plugin's behaviour.</summary>
+        public static readonly string Folder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FisheyeDewarp");
+
+        private static readonly string FilePath = Path.Combine(Folder, "dewarp.log");
 
         public static void Info(string message) => Write("INFO", message);
 
