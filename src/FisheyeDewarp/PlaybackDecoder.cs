@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using VideoOS.Platform;
@@ -8,22 +9,29 @@ using VideoOS.Platform.Data;
 namespace FisheyeDewarp
 {
     /// <summary>
-    /// SPIKE: the tile's own playback reader. Smart Client hands over a displayed playback frame in 0.2-0.5 s, so
-    /// the sharp view in Playback lags; this fetches the frame Smart Client is showing from the recording server
-    /// itself, as YCbCr 4:2:0 cropped to the view, on a background thread. Requests collapse to the latest time.
+    /// The tile's own reader of the recording, so the sharp view in Playback keeps up with the video instead of
+    /// waiting 150-900 ms for each frame from Smart Client. It fetches the frame Smart Client is showing, as
+    /// YCbCr 4:2:0 cropped to the part of the image the view needs, on a background thread; requests collapse to
+    /// the latest time. MIP decodes these on the CPU. Turned off by creating
+    /// %LOCALAPPDATA%\FisheyeDewarp\no-playback-decode (read each time Dewarp is turned on in Playback); the
+    /// sharp view then grabs frames from Smart Client as before.
     /// </summary>
     internal sealed class PlaybackDecoder : IDisposable
     {
-        private static readonly TimeSpan StatsInterval = TimeSpan.FromSeconds(10);
+        private static readonly string DisableFlag = Path.Combine(Log.Folder, "no-playback-decode");
+        private static readonly TimeSpan StatsInterval = TimeSpan.FromMinutes(1);
         // Ahead by up to this much, step frame by frame: a seek decodes from the previous key frame, about 1 s.
         private static readonly TimeSpan MaxStep = TimeSpan.FromSeconds(3);
-        private static bool _hardwareRequested;
+        // A fetch running longer than this is stuck (seeks take up to about 3 s).
+        private static readonly TimeSpan StallLimit = TimeSpan.FromSeconds(10);
+        // After a crop change with no new request, wait this long for one before fetching the same frame again
+        // at the new crop: while playing, the next request comes within a frame and a re-fetch would be a seek.
+        private const int RefetchDelayMs = 250;
 
         private readonly Item _camera;
         private readonly string _cameraName;
         private readonly System.Drawing.Size _fullSize;
         private readonly Action<SourceFrame, DateTime> _onFrame;
-        private readonly Thread _thread;
         private readonly AutoResetEvent _wake = new AutoResetEvent(false);
         private readonly object _gate = new object();
         private DateTime _requested;
@@ -31,58 +39,50 @@ namespace FisheyeDewarp
         private System.Windows.Rect _crop = new System.Windows.Rect(0, 0, 1, 1);
         private bool _cropChanged = true;
         private volatile bool _disposed;
+        private volatile bool _failed;
+        private long _fetchStarted;   // Stopwatch timestamp while a fetch runs, else 0
 
         // Worker-thread state.
         private BitmapVideoSource _source;
         private System.Windows.Rect _appliedCrop;
-        private DateTime _lastTime, _nextTime;
+        private DateTime _lastTime;       // the frame the source is positioned on
         private bool _hasLast;
+        private DateTime _deliveredTime;  // the last frame handed to the tile, at _deliveredCrop
+        private System.Windows.Rect _deliveredCrop;
+        private bool _hasDelivered;
 
         private readonly object _statsGate = new object();
         private int _requests, _frames, _sequential, _seeks;
         private long _fetchTicks, _maxFetchTicks;
         private string _decodeStatus;
-        private Timer _statsTimer;
+        private readonly Timer _statsTimer;
 
-        /// <summary>True once the reader could not start or fetch; the tile grabs frames from Smart Client instead.</summary>
-        public bool Failed { get; private set; }
+        public static bool Allowed => !File.Exists(DisableFlag);
 
+        /// <summary>
+        /// True once the reader could not start or fetch, or a fetch has hung: it delivers no more frames, and the
+        /// tile should stop it and grab frames from Smart Client instead.
+        /// </summary>
+        public bool GaveUp
+        {
+            get
+            {
+                if (_failed) return true;
+                long started = Interlocked.Read(ref _fetchStarted);
+                return started != 0 && Stopwatch.GetTimestamp() - started > StallLimit.TotalSeconds * Stopwatch.Frequency;
+            }
+        }
+
+        /// <param name="onFrame">Called on the reader's thread with each frame and its recording time (UTC).</param>
         public PlaybackDecoder(Item camera, System.Drawing.Size fullSize, Action<SourceFrame, DateTime> onFrame)
         {
             _camera = camera;
             _cameraName = camera.Name;
             _fullSize = fullSize;
             _onFrame = onFrame;
-            _thread = new Thread(Run) { IsBackground = true, Name = "Dewarp playback " + _cameraName };
-            _thread.Start();
+            new Thread(Run) { IsBackground = true, Name = "Dewarp playback " + _cameraName }.Start();
             _statsTimer = new Timer(_ => LogStats(), null, StatsInterval, StatsInterval);
-            string hw = EnvironmentManager.Instance.EnvironmentOptions.TryGetValue(EnvironmentOptions.HardwareDecodingMode, out string mode) ? mode : "(not set)";
-            Log.Info($"Playback decode START camera='{_cameraName}' size={fullSize.Width}x{fullSize.Height} HardwareDecodingMode={hw}");
-        }
-
-        /// <summary>
-        /// SPIKE: MIP's playback sources decode on the CPU (about 120 ms a frame at 9 MP) while HardwareDecodingMode
-        /// is unset, as it is in Smart Client. Set it once, at plugin start.
-        /// </summary>
-        public static void RequestHardwareDecoding()
-        {
-            if (_hardwareRequested) return;
-            _hardwareRequested = true;
-            try
-            {
-                var options = EnvironmentManager.Instance.EnvironmentOptions;
-                string before = options.TryGetValue(EnvironmentOptions.HardwareDecodingMode, out string mode) ? mode : "(not set)";
-                if (string.IsNullOrEmpty(mode))
-                {
-                    options[EnvironmentOptions.HardwareDecodingMode] = EnvironmentOptions.OptionHardwareDecodingModeAuto;
-                    EnvironmentManager.Instance.FireEnvironmentOptionsChangedEvent();
-                }
-                Log.Info($"HardwareDecodingMode {before} -> {options[EnvironmentOptions.HardwareDecodingMode]}");
-            }
-            catch (Exception ex)
-            {
-                Log.Error("Could not set HardwareDecodingMode", ex);
-            }
+            Log.Info($"Playback decode START camera='{_cameraName}' size={fullSize.Width}x{fullSize.Height}");
         }
 
         /// <summary>Fetch the frame recorded at <paramref name="utc"/> (the time Smart Client is showing).</summary>
@@ -97,7 +97,10 @@ namespace FisheyeDewarp
             _wake.Set();
         }
 
-        /// <summary>Decode only this part of the image (fractions 0..1) from the next fetch on.</summary>
+        /// <summary>
+        /// Decode only this part of the image (fractions 0..1), still at the camera's pixel density. If no new
+        /// frame is requested soon (paused), the last frame is fetched again at the new crop.
+        /// </summary>
         public void SetCrop(System.Windows.Rect crop)
         {
             lock (_gate)
@@ -105,6 +108,7 @@ namespace FisheyeDewarp
                 _crop = crop;
                 _cropChanged = true;
             }
+            _wake.Set();
         }
 
         private void Run()
@@ -117,30 +121,40 @@ namespace FisheyeDewarp
                 {
                     _wake.WaitOne();
                     if (_disposed) break;
+                    bool cropOnly;
+                    lock (_gate) cropOnly = !_hasRequest && _cropChanged;
+                    if (cropOnly && _wake.WaitOne(RefetchDelayMs)) _wake.Set();   // something else arrived; go round again
+                    if (_disposed) break;
+
                     DateTime target;
                     System.Windows.Rect crop;
                     bool cropChanged;
                     lock (_gate)
                     {
-                        if (!_hasRequest) continue;
-                        target = _requested;
+                        if (_hasRequest) target = _requested;
+                        else if (_cropChanged && _hasDelivered) target = _deliveredTime;
+                        else continue;
                         _hasRequest = false;
                         crop = _crop;
                         cropChanged = _cropChanged;
                         _cropChanged = false;
                     }
                     if (cropChanged) ApplyCrop(crop);
-                    Fetch(target);
+                    // Paused, Smart Client repeats the time on screen: the tile already has that frame.
+                    if (_hasDelivered && target == _deliveredTime && _appliedCrop == _deliveredCrop) continue;
+                    Interlocked.Exchange(ref _fetchStarted, Stopwatch.GetTimestamp());
+                    try { Fetch(target); }
+                    finally { Interlocked.Exchange(ref _fetchStarted, 0); }
                 }
             }
             catch (Exception ex)
             {
-                Failed = true;
+                _failed = true;
                 Log.Error($"Playback decode failed camera='{_cameraName}'", ex);
             }
             finally
             {
-                try { _source?.Close(); } catch (Exception ex) { Log.Error("Playback decode close failed", ex); }
+                try { _source?.Close(); } catch (Exception ex) { Log.Error($"Playback decode close failed camera='{_cameraName}'", ex); }
             }
         }
 
@@ -167,6 +181,7 @@ namespace FisheyeDewarp
                 while (got is BitmapData step && DewarpExporter.ToUtc(step.DateTime) < target && step.IsNextAvailable)
                 {
                     step.Dispose();
+                    if (_disposed) return;
                     got = _source.GetNext();
                 }
             }
@@ -185,7 +200,6 @@ namespace FisheyeDewarp
             try
             {
                 _lastTime = DewarpExporter.ToUtc(frame.DateTime);
-                _nextTime = frame.IsNextAvailable ? DewarpExporter.ToUtc(frame.NextDateTime) : _lastTime;
                 _hasLast = true;
                 lock (_statsGate)
                 {
@@ -193,12 +207,15 @@ namespace FisheyeDewarp
                     if (sequential) _sequential++; else _seeks++;
                     _fetchTicks += ticks;
                     _maxFetchTicks = Math.Max(_maxFetchTicks, ticks);
-                    _decodeStatus = $"{frame.HardwareDecodingStatus} {frame.Format} {frame.ColorSpace}";
+                    _decodeStatus = $"{frame.HardwareDecodingStatus}";
                 }
                 SourceFrame copy = Copy(frame);
                 // A frame decoded before a crop change has the old size; its crop is unknown, so skip it.
-                if (copy != null && Math.Abs(copy.FullWidth - _fullSize.Width) > 4) copy = null;
-                if (copy != null && !_disposed) _onFrame(copy, _lastTime);
+                if (copy == null || Math.Abs(copy.FullWidth - _fullSize.Width) > 4 || _disposed) return;
+                _deliveredTime = target;
+                _deliveredCrop = _appliedCrop;
+                _hasDelivered = true;
+                _onFrame(copy, _lastTime);
             }
             finally
             {
@@ -208,7 +225,8 @@ namespace FisheyeDewarp
 
         private SourceFrame Copy(BitmapData frame)
         {
-            if (frame.Format != BitmapFormat.YCbCr420_Planar) return null;
+            if (frame.Format != BitmapFormat.YCbCr420_Planar)
+                throw new NotSupportedException($"Playback frames arrive as {frame.Format}, which the sharp view cannot use");
             var planes = new byte[3][];
             for (int p = 0; p < 3; p++)
             {
@@ -240,14 +258,14 @@ namespace FisheyeDewarp
                 _fetchTicks = _maxFetchTicks = 0;
             }
             if (requests == 0 && frames == 0) return;
-            Log.Info($"Playback decode camera='{_cameraName}': {requests / StatsInterval.TotalSeconds:F1} requests/s, {frames / StatsInterval.TotalSeconds:F1} frames/s ({seq} next, {seeks} seek), fetch avg {avg:F0} ms max {max:F0} ms, crop {_appliedCrop.Width * _appliedCrop.Height * 100:F0}%, decode={status}");
+            Log.Info($"Playback decode camera='{_cameraName}': {frames / StatsInterval.TotalSeconds:F1} fps ({seq} stepped, {seeks} seeks), fetch avg {avg:F0} ms max {max:F0} ms, decode={status}");
         }
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
-            _statsTimer?.Dispose();
+            _statsTimer.Dispose();
             _wake.Set();
             Log.Info($"Playback decode STOP camera='{_cameraName}'");
         }
