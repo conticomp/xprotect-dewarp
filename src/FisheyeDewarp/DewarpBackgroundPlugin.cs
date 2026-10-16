@@ -21,6 +21,7 @@ namespace FisheyeDewarp
         public override void Init()
         {
             ClientControl.Instance.NewImageViewerControlEvent += OnNewImageViewer;
+            PlaybackDecoder.RequestHardwareDecoding();   // SPIKE: as early as a plugin can, before any source exists
             Log.Info("Background plugin initialized");
         }
 

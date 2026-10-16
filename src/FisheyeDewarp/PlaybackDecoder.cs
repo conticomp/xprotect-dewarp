@@ -57,15 +57,32 @@ namespace FisheyeDewarp
             _thread.Start();
             _statsTimer = new Timer(_ => LogStats(), null, StatsInterval, StatsInterval);
             string hw = EnvironmentManager.Instance.EnvironmentOptions.TryGetValue(EnvironmentOptions.HardwareDecodingMode, out string mode) ? mode : "(not set)";
-            if (!_hardwareRequested && string.IsNullOrEmpty(mode))
-            {
-                // Unset in Smart Client, and MIP's playback sources then decode on the CPU (about 120 ms a frame).
-                _hardwareRequested = true;
-                EnvironmentManager.Instance.EnvironmentOptions[EnvironmentOptions.HardwareDecodingMode] = EnvironmentOptions.OptionHardwareDecodingModeAuto;
-                EnvironmentManager.Instance.FireEnvironmentOptionsChangedEvent();
-                hw += " -> " + EnvironmentOptions.OptionHardwareDecodingModeAuto;
-            }
             Log.Info($"Playback decode START camera='{_cameraName}' size={fullSize.Width}x{fullSize.Height} HardwareDecodingMode={hw}");
+        }
+
+        /// <summary>
+        /// SPIKE: MIP's playback sources decode on the CPU (about 120 ms a frame at 9 MP) while HardwareDecodingMode
+        /// is unset, as it is in Smart Client. Set it once, at plugin start.
+        /// </summary>
+        public static void RequestHardwareDecoding()
+        {
+            if (_hardwareRequested) return;
+            _hardwareRequested = true;
+            try
+            {
+                var options = EnvironmentManager.Instance.EnvironmentOptions;
+                string before = options.TryGetValue(EnvironmentOptions.HardwareDecodingMode, out string mode) ? mode : "(not set)";
+                if (string.IsNullOrEmpty(mode))
+                {
+                    options[EnvironmentOptions.HardwareDecodingMode] = EnvironmentOptions.OptionHardwareDecodingModeAuto;
+                    EnvironmentManager.Instance.FireEnvironmentOptionsChangedEvent();
+                }
+                Log.Info($"HardwareDecodingMode {before} -> {options[EnvironmentOptions.HardwareDecodingMode]}");
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Could not set HardwareDecodingMode", ex);
+            }
         }
 
         /// <summary>Fetch the frame recorded at <paramref name="utc"/> (the time Smart Client is showing).</summary>

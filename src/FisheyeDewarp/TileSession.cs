@@ -749,6 +749,8 @@ namespace FisheyeDewarp
             // A frame from another moment than the video underneath looks smeared; the soft view is better.
             if (stale)
             {
+                // Drop the frame too, or panning re-renders it.
+                _frame = null;
                 if (_still != null) _still.Visibility = Visibility.Collapsed;
                 return;
             }
