@@ -33,8 +33,8 @@ namespace FisheyeDewarp
         private readonly object _statsGate = new object();
         private int _frames;
         private long _copyTicks;
-        private DateTime _lastFrameUtc;
         private string _decodeStatus;
+        private string _lastSize;
         private Timer _statsTimer;
         private bool _disposed;
         private bool _counted;
@@ -54,18 +54,23 @@ namespace FisheyeDewarp
         }
 
         /// <summary>Starts decoding; <paramref name="onFrame"/> is called on a background thread. Null on failure.</summary>
-        public static LiveDecoder Start(Item camera, Guid streamId, Action<SourceFrame> onFrame)
+        public static LiveDecoder Start(Item camera, Guid streamId, System.Drawing.Size size, Action<SourceFrame> onFrame)
         {
             LiveDecoder decoder = null;
             try
             {
                 decoder = new LiveDecoder(camera, streamId, onFrame);
                 decoder._source.Init();
-                decoder._source.LiveModeStart = true;   // Width/Height stay 0: frames arrive at the camera's own size
+                // The size must be set explicitly: left at 0, frames arrive scaled to 640x480.
+                decoder._source.Width = size.Width;
+                decoder._source.Height = size.Height;
+                decoder._source.SetKeepAspectRatio(true, false);
+                decoder._source.SetWidthHeight();
+                decoder._source.LiveModeStart = true;
                 decoder._statsTimer = new Timer(_ => decoder.LogStats(), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
                 Interlocked.Increment(ref _running);
                 decoder._counted = true;
-                Log.Info($"Live decode START camera='{camera.Name}' stream={streamId} (running: {_running})");
+                Log.Info($"Live decode START camera='{camera.Name}' stream={streamId} size={size.Width}x{size.Height} (running: {_running})");
                 return decoder;
             }
             catch (Exception ex)
@@ -73,15 +78,6 @@ namespace FisheyeDewarp
                 Log.Error($"Live decode could not start for camera='{camera?.Name}'", ex);
                 decoder?.Dispose();
                 return null;
-            }
-        }
-
-        /// <summary>True while frames are arriving; until then (or if they stop) the tile falls back to grabbing.</summary>
-        public bool Receiving
-        {
-            get
-            {
-                lock (_statsGate) return DateTime.UtcNow - _lastFrameUtc < TimeSpan.FromSeconds(2);
             }
         }
 
@@ -108,9 +104,9 @@ namespace FisheyeDewarp
                 long ticks = Stopwatch.GetTimestamp() - start;
                 lock (_statsGate)
                 {
+                    if (frame != null) _lastSize = $"{frame.Width}x{frame.Height}";
                     _frames++;
                     _copyTicks += ticks;
-                    _lastFrameUtc = DateTime.UtcNow;
                     _decodeStatus = content.HardwareDecodingStatus;
                 }
                 if (frame != null) _onFrame(frame);
@@ -151,16 +147,17 @@ namespace FisheyeDewarp
         {
             int frames;
             double copyMs;
-            string status;
+            string status, size;
             lock (_statsGate)
             {
+                size = _lastSize;
                 frames = _frames;
                 copyMs = frames == 0 ? 0 : _copyTicks * 1000.0 / Stopwatch.Frequency / frames;
                 status = _decodeStatus;
                 _frames = 0;
                 _copyTicks = 0;
             }
-            Log.Info($"Live decode camera='{_camera}': {frames / 10.0:F1} fps, copy {copyMs:F1} ms/frame, decode={status}");
+            Log.Info($"Live decode camera='{_camera}': {frames / 10.0:F1} fps at {size}, copy {copyMs:F1} ms/frame, decode={status}");
         }
 
         public void Dispose()

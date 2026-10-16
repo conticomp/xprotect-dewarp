@@ -470,7 +470,7 @@ namespace FisheyeDewarp
         private void RequestFrame()
         {
             if (_grabbing || !Enabled || !_frameStale) return;
-            if (_live != null && _live.Receiving) return;
+            if (_live != null && DateTime.UtcNow - _lastLiveFrameUtc < TimeSpan.FromSeconds(2)) return;   // the live decode is delivering
             if (_frame != null && Steering) return;
             if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
@@ -558,7 +558,7 @@ namespace FisheyeDewarp
             if (want && _live == null && !_liveRefused)
             {
                 VideoOS.Platform.Item camera = Camera;
-                if (camera == null) return;
+                if (camera == null || _originalSize.IsEmpty) return;   // the size comes from the first displayed frame
                 if (!LiveDecoder.Allowed)
                 {
                     _liveRefused = true;
@@ -568,10 +568,18 @@ namespace FisheyeDewarp
                 Dispatcher dispatcher = _input?.Dispatcher;
                 if (dispatcher == null) return;
                 LiveDecoder decoder = null;
-                decoder = LiveDecoder.Start(camera, _addOn.StreamId, frame =>
+                System.Drawing.Size size = _originalSize;
+                decoder = LiveDecoder.Start(camera, _addOn.StreamId, size, frame =>
                     dispatcher.BeginInvoke(new Action(() =>
                     {
                         if (_live != decoder || !Enabled) return;
+                        // Never let the sharp view get softer than grabbing would make it.
+                        if (frame.Width < size.Width || frame.Height < size.Height)
+                        {
+                            if (_smallLiveLogs++ < 3) Log.Info($"Live decode frame {frame.Width}x{frame.Height} is smaller than the camera's {size.Width}x{size.Height}; ignored, grabbing instead");
+                            return;
+                        }
+                        _lastLiveFrameUtc = DateTime.UtcNow;
                         _frame = frame;
                         _frameStale = false;
                         System.Threading.Interlocked.Increment(ref SharpFrames);
@@ -592,6 +600,8 @@ namespace FisheyeDewarp
         }
 
         private bool _liveRefused;
+        private int _smallLiveLogs;
+        private DateTime _lastLiveFrameUtc;
 
         private void ShowToast(string text, bool keep = false)
         {
