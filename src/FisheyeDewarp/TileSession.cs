@@ -63,6 +63,11 @@ namespace FisheyeDewarp
         // In Live, frames come from the tile's own decoded stream instead of Smart Client's slow grab.
         private LiveDecoder _live;
         private bool _liveRefused;
+
+        // In Playback, frames come from the tile's own reader of the recording instead.
+        private PlaybackDecoder _playback;
+        private bool _playbackRefused;
+        private DateTime _playbackFrameTime;   // recording time of _frame when it came from the reader
         private bool _stillInLive;   // the mode _frame came from
         private DateTime _lastLiveFrameUtc;
         // After this long without a decoded frame, the tile goes back to grabbing Smart Client's frames.
@@ -163,6 +168,7 @@ namespace FisheyeDewarp
             _frameStale = _lastImageTime != default;   // grab the frame on screen, if the tile has shown one
             _stillInLive = _addOn.InLiveMode;
             UpdateLiveDecoder();
+            UpdatePlaybackDecoder();
             RenderStill();
             Log.Info($"Dewarp ON  {Describe()} {_view} | {GeometryReport()}");
             return true;
@@ -182,6 +188,7 @@ namespace FisheyeDewarp
             _addOn.DigitalZoomEnabled = _savedDigitalZoom;
             Enabled = false;
             UpdateLiveDecoder();
+            UpdatePlaybackDecoder();
             EnabledChanged?.Invoke(this);
             Log.Info($"Dewarp OFF {Describe()}");
             return true;
@@ -510,7 +517,7 @@ namespace FisheyeDewarp
         private void RequestFrame()
         {
             if (_grabbing || !Enabled || !_frameStale) return;
-            if (LiveFeeding) return;
+            if (DecoderFeeding) return;
             if (_frame != null && Steering) return;
             if (DateTime.UtcNow < _grabRetryAt) return;
             _grabbing = true;
@@ -562,7 +569,7 @@ namespace FisheyeDewarp
                     Log.Info($"Frame grab recovered after {_grabFailures} failure(s) for {Describe()}");
                 _grabFailures = 0;
                 _grabBackoff = GrabBackoffMin;
-                if (LiveFeeding) return;   // a decoded frame newer than this grab is already showing
+                if (DecoderFeeding) return;   // a decoded frame newer than this grab is already showing
                 if (grabInLive != _stillInLive)
                 {
                     // Grabbed before a Live/Playback switch, so it shows the other mode's picture: grab again.
@@ -600,12 +607,12 @@ namespace FisheyeDewarp
         }
 
         /// <summary>
-        /// Keeps the live decode cropped to the part of the fisheye the view samples, plus a margin so panning and
+        /// Keeps the live decode (or the playback reader) cropped to the part of the fisheye the view samples, plus a margin so panning and
         /// zooming out stay sharp until the next frame. Re-crops when the view leaves the crop or shrinks well inside it.
         /// </summary>
         private void UpdateCrop()
         {
-            if (_live == null || _originalSize.IsEmpty) return;
+            if ((_live == null && _playback == null) || _originalSize.IsEmpty) return;
             Rect need = ViewBounds();
             if (need.IsEmpty) return;
             Rect fresh = need;
@@ -614,9 +621,10 @@ namespace FisheyeDewarp
             // Keep the current crop while it covers the view and is not much larger than a fresh one would be.
             if (_crop.Contains(need) && _crop.Width * _crop.Height <= 2 * fresh.Width * fresh.Height) return;
             _crop = fresh;
-            _live.SetCrop(_crop);
+            _live?.SetCrop(_crop);
+            _playback?.SetCrop(_crop);
             if (_cropLogs++ < 10)
-                Log.Info($"Live decode crop {_crop.X:F3},{_crop.Y:F3} {_crop.Width:F3}x{_crop.Height:F3} ({_crop.Width * _crop.Height * 100:F0}% of the image) for {_view}");
+                Log.Info($"{(_live != null ? "Live" : "Playback")} decode crop {_crop.X:F3},{_crop.Y:F3} {_crop.Width:F3}x{_crop.Height:F3} ({_crop.Width * _crop.Height * 100:F0}% of the image) for {_view}");
         }
 
         /// <summary>The part of the fisheye image (fractions 0..1) the current view samples, from a grid of view rays.</summary>
@@ -688,6 +696,63 @@ namespace FisheyeDewarp
             }
         }
 
+        /// <summary>Runs the tile's own playback reader while dewarp is on in Playback, and stops it otherwise.</summary>
+        private void UpdatePlaybackDecoder()
+        {
+            bool want = Enabled && !_addOn.InLiveMode;
+            if (_playback != null && _playback.GaveUp)
+            {
+                Log.Info($"Playback decode gave up; grabbing frames from Smart Client for {Describe()}");
+                _playback.Dispose();
+                _playback = null;
+                _playbackRefused = true;
+                _frameStale = true;
+            }
+            if (want && _playback == null && !_playbackRefused)
+            {
+                VideoOS.Platform.Item camera = Camera;
+                if (camera == null || _originalSize.IsEmpty) return;
+                if (!PlaybackDecoder.Allowed)
+                {
+                    _playbackRefused = true;
+                    Log.Info($"Playback decode turned off by the no-playback-decode file; grabbing frames from Smart Client for {Describe()}");
+                    return;
+                }
+                Dispatcher dispatcher = _input?.Dispatcher;
+                if (dispatcher == null) return;
+                PlaybackDecoder reader = null;
+                reader = new PlaybackDecoder(camera, _originalSize, (frame, time) =>
+                    dispatcher.BeginInvoke(new Action(() => OnPlaybackFrame(reader, frame, time))));
+                _playback = reader;
+                _crop = WholeImage;
+                _cropLogs = 0;
+                UpdateCrop();
+                if (DisplayedTimeUtc is DateTime shown) _playback.Request(shown);
+            }
+            else if (!want)
+            {
+                _playbackRefused = false;
+                _playback?.Dispose();
+                _playback = null;
+            }
+        }
+
+        private void OnPlaybackFrame(PlaybackDecoder from, SourceFrame frame, DateTime time)
+        {
+            if (_playback != from || !Enabled || _addOn.InLiveMode) return;
+            DateTime shown = DisplayedTimeUtc ?? time;
+            if ((shown - time).Duration() > PlaybackDecoder.MaxLag)
+            {
+                _frame = null;   // or panning would render it again
+                if (_still != null) _still.Visibility = Visibility.Collapsed;
+                return;
+            }
+            _frame = frame;
+            _playbackFrameTime = time;
+            _frameStale = false;
+            RenderStill();
+        }
+
         private void OnLiveFrame(LiveDecoder from, SourceFrame frame)
         {
             from.Delivered();
@@ -701,6 +766,9 @@ namespace FisheyeDewarp
 
         /// <summary>The live decode is delivering frames, so Smart Client's frames are neither grabbed nor rendered.</summary>
         private bool LiveFeeding => _live != null && DateTime.UtcNow - _lastLiveFrameUtc < LiveStall;
+
+        /// <summary>The tile's own decode supplies the frames, so Smart Client's are not grabbed.</summary>
+        private bool DecoderFeeding => LiveFeeding || (_playback != null && !_playback.GaveUp);
 
         private static readonly Rect WholeImage = new Rect(0, 0, 1, 1);
 
@@ -786,6 +854,9 @@ namespace FisheyeDewarp
 
         private void ViewChanged()
         {
+            // As in OnFrame, so a decoder that gave up while paused is swapped for grabbing on the next pan.
+            UpdateLiveDecoder();
+            UpdatePlaybackDecoder();
             UpdateGeometry();
             RenderStill();
         }
@@ -794,8 +865,21 @@ namespace FisheyeDewarp
         {
             if (!Enabled) return;
             UpdateLiveDecoder();   // follows the tile between Live and Playback
+            UpdatePlaybackDecoder();
             bool resized = area != _lastArea || _addOn.PaintSizeWpf != _lastPaint;
             if (resized) UpdateGeometry();
+            if (_playback != null && DisplayedTimeUtc is DateTime shown)
+            {
+                if (_frame != null && (shown - _playbackFrameTime).Duration() > PlaybackDecoder.MaxLag)
+                {
+                    // A jump on the timeline: the sharp view shows the old moment until the reader catches up.
+                    _frame = null;
+                    if (_still != null) _still.Visibility = Visibility.Collapsed;
+                }
+                _playback.Request(shown);
+                if (resized) RenderStill();
+                return;
+            }
             if (LiveFeeding)
             {
                 // The decode's own frames trigger the renders; this one would redo the same frame.

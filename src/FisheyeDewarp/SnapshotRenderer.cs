@@ -260,6 +260,18 @@ namespace FisheyeDewarp
             _pixels = pixels;
         }
 
+        /// <summary>Copies one plane of a decoded frame, dropping any row padding.</summary>
+        public static byte[] CopyPlane(IntPtr scan0, int width, int height, int stride)
+        {
+            var plane = new byte[width * height];
+            if (stride == width)
+                System.Runtime.InteropServices.Marshal.Copy(scan0, plane, 0, plane.Length);
+            else
+                for (int y = 0; y < height; y++)
+                    System.Runtime.InteropServices.Marshal.Copy(scan0 + y * stride, plane, y * width, width);
+            return plane;
+        }
+
         /// <summary>A YCbCr 4:2:0 frame covering <paramref name="crop"/> (fractions 0..1 of the full fisheye image).</summary>
         public SourceFrame(byte[] luma, byte[] cb, byte[] cr, int width, int height, int chromaWidth, int chromaHeight, System.Windows.Rect crop)
             : this(width, height, crop)

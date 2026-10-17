@@ -179,8 +179,8 @@ In Management Client, look under **Server Logs > Audit logs** (category **Export
 
 - **One extra stream per dewarped Live tile.** The sharp view in Live opens its own live stream from the recording server for each
   dewarped tile, while Dewarp is on. On a LAN this is usually unnoticeable; over a slow or remote link, four dewarped tiles of a 12 MP
-  camera mean four extra full-resolution streams. Playback uses no extra stream. To turn the extra stream off, see
-  [Troubleshooting](#troubleshooting).
+  camera mean four extra full-resolution streams. In Playback, each dewarped tile likewise reads the recording itself, which costs
+  one extra playback stream and its decoding on the CPU. To turn either off, see [Troubleshooting](#troubleshooting).
 - **Ceiling mount only.** Wall-mount geometry exists in the code but has no setting yet.
 - **The lens is hard-coded** to a stereographic 182° lens with the image circle filling the frame (Axis M4328-P). Other fisheye cameras may look
   slightly distorted.
@@ -214,6 +214,7 @@ The plugin writes a log to:
 | Export says there is no recorded video | Check the time range in Playback; the camera may not have recorded then. |
 | Smart Client shows an `SEHException` in `GetCurrentImage` | Smart Client could not hand over a full-resolution frame, usually because the connection to the VMS dropped. The plugin waits for a new frame and backs off (up to 30 s) before trying again, so the error should not repeat while the connection is down. The tile keeps its shader view meanwhile. |
 | Live sharp view uses too much bandwidth or CPU | Create an empty file named `no-live-decode` in `%LOCALAPPDATA%\FisheyeDewarp` and turn Dewarp off and on. The tile then grabs frames from Smart Client as before: no extra stream, but the sharp view refreshes only once or twice a second in Live. Delete the file to undo. |
+| Playback sharp view uses too much bandwidth or CPU | Create an empty file named `no-playback-decode` in the same folder and turn Dewarp off and on in Playback. The tile then grabs frames from Smart Client, and the sharp view lags the video. Delete the file to undo. |
 | Slow over Remote Desktop | Expected, because RDP uses software rendering. Evaluate at the physical workstation. |
 
 ## Uninstall
@@ -245,8 +246,9 @@ comes from the tag. The MSI uses the tag without its suffix (`v0.2.0-beta.1` →
   Smart Client is already drawing. It is instant, but limited to the tile's resolution.
 - **Sharp view:** the plugin dewarps the full-resolution frame on the CPU with the same lens math and shows it on top of the fast view.
   In Live, each dewarped tile opens its own `BitmapLiveSource`, cropped to the part of the fisheye image the view samples (plus a
-  margin), decoded by MIP as YCbCr 4:2:0, so only the sampled pixels are converted to RGB. In Playback, or when the live decode is off,
-  it grabs the frame Smart Client is showing. The source position of each output pixel is computed exactly every 8 pixels and
+  margin), decoded by MIP as YCbCr 4:2:0, so only the sampled pixels are converted to RGB. In Playback, each dewarped tile reads the
+  recording with its own `BitmapVideoSource`, cropped the same way, stepping frame by frame to the time Smart Client shows (seeking
+  only after a jump). When either is off or fails, it grabs the frame Smart Client is showing. The source position of each output pixel is computed exactly every 8 pixels and
   interpolated between, and reused until the view changes, so a still view costs a few milliseconds per frame on up to four threads.
 - **Export:** the range is split into up to six parts, each on its own thread with its own `BitmapVideoSource`, which fetches the recorded
   frames at full resolution. A lookup table built once per export dewarps each frame. The camera name and time are drawn with GDI+,
