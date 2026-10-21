@@ -8,8 +8,7 @@ It was built to replace Axis Optimizer's dewarping for Axis M4328-P fisheye came
 
 ## See it in action
 
-<!-- To show an inline player: edit this README on github.com, drag the demo MP4 onto the next line, and delete the poster link below. -->
-[![Watch the 1½-minute demo: dewarp in the tile, dewarp several fisheyes at once, and export the same view to MP4](docs/media/demo-poster.jpg)](https://github.com/conticomp/xprotect-dewarp/releases/download/v0.4.1/fisheye-dewarp-demo.mp4)
+[![Watch the 1½-minute demo: dewarp in the tile, dewarp several fisheyes at once, and export the same view to MP4](docs/media/demo-poster.jpg)](https://youtu.be/3b0Zukr7JE8)
 
 *The demo uses an illustrated lobby, not real camera footage.*
 
