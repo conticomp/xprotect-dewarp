@@ -26,7 +26,9 @@ namespace FisheyeDewarp
         public override void Init()
         {
             if (EnvironmentManager.Instance.EnvironmentType != EnvironmentType.SmartClient) return;
-            Log.Info($"Plugin loading. Smart Client environment, CLR {Environment.Version}");
+            Log.Info($"Plugin {VersionString} loading. Smart Client environment, CLR {Environment.Version}, " +
+                     $"OS {Environment.OSVersion.Version}, user {Environment.UserName}, session {Environment.GetEnvironmentVariable("SESSIONNAME")}");
+            CrashLog.Start();
             _backgroundPlugins.Add(new DewarpBackgroundPlugin());
             _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Dewarp));
             _toolbarPlugins.Add(new DewarpToolbarPlugin(ToolbarKind.Snapshot));
@@ -35,6 +37,7 @@ namespace FisheyeDewarp
 
         public override void Close()
         {
+            CrashLog.Stop();
             _backgroundPlugins.Clear();
             _toolbarPlugins.Clear();
         }

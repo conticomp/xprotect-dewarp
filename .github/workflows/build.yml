@@ -52,7 +52,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           $bin = 'src/FisheyeDewarp/bin/Release/net48'
           Copy-Item "$bin/FisheyeDewarp.dll", "$bin/FisheyeDewarp.pdb", "$bin/plugin.def" $stage
-          Copy-Item packaging/install.ps1, README.md, LICENSE, NOTICE $stage
+          Copy-Item packaging/install.ps1, packaging/collect-diagnostics.ps1, README.md, LICENSE, NOTICE $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "out/$name.zip"
           $hash = (Get-FileHash "out/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Set-Content "out/$name.zip.sha256" -Encoding ascii
@@ -76,6 +76,25 @@ jobs:
       - name: Test MSI
         shell: pwsh
         run: packaging/msi/Test-Msi.ps1 -Msi "out/${{ steps.package.outputs.name }}.msi" -UpgradeMsi out/msi-upgrade/FisheyeDewarp.msi
+
+      # The collector is run in Windows PowerShell 5.1 on workstations, so test it there.
+      - name: Test diagnostics collector
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File packaging/collect-diagnostics.ps1 -Days 1 -OutputFolder out/diag
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $zip = @(Get-ChildItem out/diag -Filter 'FisheyeDewarp-diagnostics-*.zip')
+          if ($zip.Count -ne 1) { throw "Expected one diagnostics zip in out/diag, found $($zip.Count)." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip[0].FullName)
+          try {
+            $archive.Entries | ForEach-Object { "$($_.Length)`t$($_.FullName)" }
+            $reader = New-Object IO.StreamReader($archive.GetEntry('collector.log').Open())
+            try { $log = $reader.ReadToEnd() } finally { $reader.Dispose() }
+          } finally { $archive.Dispose() }
+          # A step that throws is only noted in collector.log, so check it rather than the exit code.
+          $failed = @($log -split "`r?`n" | Where-Object { $_ -match 'FAILED:' })
+          if ($failed) { $failed; throw "$($failed.Count) collection step(s) failed." }
 
       - name: Keep MSI test logs
         if: failure()

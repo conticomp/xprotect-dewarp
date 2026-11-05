@@ -223,6 +223,22 @@ The plugin writes a log to:
 | Playback sharp view uses too much bandwidth or CPU | Create an empty file named `no-playback-decode` in the same folder and turn Dewarp off and on in Playback. The tile then grabs frames from Smart Client, and the sharp view lags the video. Delete the file to undo. |
 | Slow over Remote Desktop | Expected, because RDP uses software rendering. Evaluate at the physical workstation. |
 
+### Collecting diagnostics
+
+If Smart Client crashes, freezes or the PC restarts while using Dewarp, run `collect-diagnostics.ps1` on that workstation. It is
+in the release zip and in this repository under `packaging/`. Run it from an administrator PowerShell if you can, since some
+evidence (bluescreen minidumps, other users' logs) is only readable as administrator:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\collect-diagnostics.ps1
+```
+
+It only reads; it does not stop Smart Client or change any settings. It gathers the plugin log, Smart Client logs, crash, bluescreen
+and display-driver events, Windows Error Reporting reports, installed versions and a system and GPU summary from the last 14 days
+(`-Days 30` to go further back), and saves them as `FisheyeDewarp-diagnostics-<computer>-<time>.zip` on the desktop. Send us that
+zip along with roughly when the problem happened and what you were doing in Smart Client. If we ask for crash dumps, run it again
+with `-IncludeDumps` (the zip can then be hundreds of MB).
+
 ## Uninstall
 
 If you installed with the MSI, remove **Fisheye Dewarp for XProtect Smart Client** in **Settings › Apps**. If you used PowerShell,

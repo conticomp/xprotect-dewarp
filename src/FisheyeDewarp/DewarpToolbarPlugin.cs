@@ -62,7 +62,17 @@ namespace FisheyeDewarp
 
         public DewarpToolbarPluginInstance(ToolbarKind kind) => _kind = kind;
 
-        public override void Init(Item viewItemInstance, Item window)
+        // Every entry point from Smart Client goes through Log.Guard: an exception here would crash Smart Client.
+        public override void Init(Item viewItemInstance, Item window) =>
+            Log.Guard($"{_kind} button Init (window={window?.FQID?.ObjectId})", () => InitCore(viewItemInstance, window));
+
+        public override void OnIsCheckedChanged() => Log.Guard($"{Context} OnIsCheckedChanged({IsChecked})", OnIsCheckedChangedCore);
+
+        public override void Activate() => Log.Guard($"{Context} Activate", ActivateCore);
+
+        private string Context => $"{_kind} button window={_windowId} index={_index}";
+
+        private void InitCore(Item viewItemInstance, Item window)
         {
             _windowId = window?.FQID?.ObjectId ?? Guid.Empty;
             if (viewItemInstance?.Properties != null && viewItemInstance.Properties.TryGetValue("Index", out string raw))
@@ -89,11 +99,12 @@ namespace FisheyeDewarp
             }
         }
 
-        private void OnTileEnabledChanged(TileSession session)
-        {
-            if (session.WindowId == _windowId && session.ViewItemIndex == _index)
-                ShowSnapshotState(session.Enabled);
-        }
+        private void OnTileEnabledChanged(TileSession session) =>
+            Log.Guard($"{Context} OnTileEnabledChanged", () =>
+            {
+                if (session.WindowId == _windowId && session.ViewItemIndex == _index)
+                    ShowSnapshotState(session.Enabled);
+            });
 
         /// <summary>A snapshot is of the dewarped view, so the button is greyed out while Dewarp is off.</summary>
         private void ShowSnapshotState(bool dewarpOn)
@@ -104,14 +115,14 @@ namespace FisheyeDewarp
                 : "Dewarped snapshot: turn on Dewarp first.";
         }
 
-        public override void OnIsCheckedChanged()
+        private void OnIsCheckedChangedCore()
         {
             TileSession session = FindSession();
             if (session != null && !session.SetEnabled(IsChecked) && IsChecked)
                 IsChecked = false;
         }
 
-        public override void Activate()
+        private void ActivateCore()
         {
             if (_kind == ToolbarKind.Export)
             {

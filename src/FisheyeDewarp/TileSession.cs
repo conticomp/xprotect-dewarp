@@ -32,6 +32,7 @@ namespace FisheyeDewarp
         private Point _dragLast;
         private Rect _lastArea;
         private int _imageEventsLogged;
+        private bool _indexErrorLogged;
         private TextBlock _toast;
         private DispatcherTimer _toastTimer;
         private bool _snapshotBusy;
@@ -104,7 +105,33 @@ namespace FisheyeDewarp
 
         public Guid WindowId => _addOn.WindowInformation?.WindowId ?? Guid.Empty;
 
-        public int ViewItemIndex => _addOn.ViewItemIndex;
+        /// <summary>
+        /// The tile's position in its view, or int.MinValue (never a real index) if Smart Client can no longer place it.
+        /// On a view switch the old view's tiles stay in the list until their CloseEvent fires, and asking Smart Client
+        /// for their position throws a NullReferenceException in ContentGrid.GetContentHolder. That call runs inside
+        /// the new tiles' toolbar Init, so letting it escape crashes Smart Client.
+        /// </summary>
+        public int ViewItemIndex
+        {
+            get
+            {
+                try
+                {
+                    return _addOn.ViewItemIndex;
+                }
+                catch (Exception ex)
+                {
+                    if (!_indexErrorLogged)
+                    {
+                        _indexErrorLogged = true;
+                        string camera;
+                        try { camera = _addOn.CameraName; } catch (Exception) { camera = "?"; }
+                        Log.Error($"Smart Client could not place tile camera='{camera}' window={WindowId} (view switch?); skipping it until it closes", ex);
+                    }
+                    return int.MinValue;
+                }
+            }
+        }
 
         public string Describe() =>
             $"camera='{_addOn.CameraName}' window={WindowId} index={ViewItemIndex} type={_addOn.ImageViewerType} live={_addOn.InLiveMode}";

@@ -50,16 +50,16 @@ namespace FisheyeDewarp
             }
         }
 
-        private void OnNewImageViewer(ImageViewerAddOn addOn)
+        private void OnNewImageViewer(ImageViewerAddOn addOn) => Log.Guard("Tracking a new tile", () =>
         {
             if (addOn.ImageViewerType != ImageViewerType.CameraViewItem) return;
             var session = new TileSession(addOn);
             addOn.CloseEvent += (sender, e) =>
             {
-                session.Close();
                 lock (Sessions) Sessions.Remove(session);
+                Log.Guard("Closing a tile", session.Close);
             };
             lock (Sessions) Sessions.Add(session);
-        }
+        });
     }
 }
